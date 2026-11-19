@@ -16,6 +16,9 @@ use tokio_util::sync::CancellationToken;
 pub(super) const LINE_CHARS: usize = 2_000;
 /// What a line cut at [`LINE_CHARS`] ends with.
 pub(super) const LINE_CUT: &str = "… (line truncated to 2000 characters)";
+/// What a line cut shorter than that ends with, where a cut output ran out
+/// of room for it.
+pub(super) const LINE_PART_CUT: &str = "… (line truncated)";
 /// Bytes of a line `read` keeps: enough for [`LINE_CHARS`] characters,
 /// since none takes more than four.
 const READ_LINE_BYTES: usize = LINE_CHARS * 4;
@@ -157,7 +160,11 @@ fn without_split_character(bytes: &[u8]) -> &[u8] {
 /// whose bytes went on, `long`) ending in [`LINE_CUT`].
 pub(super) fn shown(text: &str, long: bool) -> Cow<'_, str> {
     match text.char_indices().nth(LINE_CHARS) {
-        Some((end, _)) => Cow::Owned(format!("{}{LINE_CUT}", &text[..end])),
+        // An emoji or flag the cut falls in is left out whole.
+        Some((end, _)) => Cow::Owned(format!(
+            "{}{LINE_CUT}",
+            &text[..super::whole_cut(text, end)]
+        )),
         None if long => Cow::Owned(format!("{text}{LINE_CUT}")),
         None => Cow::Borrowed(text),
     }

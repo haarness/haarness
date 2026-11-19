@@ -27629,6 +27629,171 @@ fn a_file_dropped_into_shell_mode_stays_its_path() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// A drop of a screenshot and other files attaches the screenshot and types
+/// the other paths in where the caret is, as the terminal wrote them and
+/// never folded into a paste chip, however long; in shell mode every path
+/// stays text.
+#[test]
+fn a_drop_of_media_and_other_files_attaches_the_media_and_types_the_rest() {
+    let root = std::env::temp_dir().join(format!("haarness-drop-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&root).unwrap();
+    let as_dropped = |path: &std::path::Path| {
+        if cfg!(windows) {
+            format!("\"{}\"", path.display())
+        } else {
+            path.display().to_string().replace(' ', "\\ ")
+        }
+    };
+    let image = root.join("screen shot.png");
+    std::fs::write(&image, b"png fixture").unwrap();
+    let others: Vec<_> = (1..=7)
+        .map(|index| {
+            let other = root.join(format!("{} notes {index}.md", "long ".repeat(28)));
+            std::fs::write(&other, "# Notes\n").unwrap();
+            other
+        })
+        .collect();
+    let typed = others
+        .iter()
+        .map(|other| as_dropped(other))
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(typed.len() > 1_000, "{}", typed.len());
+    let dropped = format!("{} {typed} ", as_dropped(&image));
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+
+    app.composer.set_text_split("compare ", "with the notes");
+    app.paste_into_prompt(&dropped, crate::media::Uploads::No);
+    assert_eq!(
+        app.attachments,
+        vec![dunce::canonicalize(&image).unwrap().display().to_string()]
+    );
+    assert_eq!(
+        app.composer.text(),
+        format!("compare {typed} with the notes")
+    );
+    assert_eq!(app.composer.expanded_text(), app.composer.text());
+    assert_eq!(app.notice, "Attached 1 file · backspace removes");
+    assert!(app.slash_suggestions().is_none());
+
+    // Shell mode reads only the prompt's text: the whole drop stays text.
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    app.shell_mode = true;
+    app.notice.clear();
+    app.composer.set_text("ls -l ".into());
+    let short = format!("{} {} ", as_dropped(&image), as_dropped(&others[0]));
+    app.paste_into_prompt(&short, crate::media::Uploads::No);
+    assert!(app.attachments.is_empty());
+    assert_eq!(app.composer.text(), format!("ls -l {short}"));
+    assert!(app.notice.is_empty(), "{}", app.notice);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// A drop of media and other files whose media break a limit says why and
+/// still puts the whole drop in the prompt as text, as a paste of it would.
+#[test]
+fn a_mixed_drop_over_a_limit_is_reported_and_kept_as_text() {
+    let root = std::env::temp_dir().join(format!("haarness-drop-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&root).unwrap();
+    let readme = root.join("README.md");
+    std::fs::write(&readme, "# Notes\n").unwrap();
+    let mut paths: Vec<_> = (1..=9)
+        .map(|index| {
+            let shot = root.join(format!("shot-{index}.png"));
+            std::fs::write(&shot, b"png fixture").unwrap();
+            shot.display().to_string()
+        })
+        .collect();
+    paths.push(readme.display().to_string());
+    let dropped = paths
+        .iter()
+        .map(|path| {
+            if cfg!(windows) {
+                format!("\"{path}\"")
+            } else {
+                path.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+
+    app.paste_into_prompt(&dropped, crate::media::Uploads::No);
+    assert!(app.attachments.is_empty());
+    assert_eq!(app.composer.expanded_text(), dropped);
+    assert_eq!(app.notice, "Attach at most 8 files at once");
+
+    // Media alone over the limit are refused whole, as before.
+    app.composer.clear();
+    app.paste_into_prompt(
+        &dropped[..dropped.rfind(' ').unwrap()],
+        crate::media::Uploads::No,
+    );
+    assert!(app.composer.is_empty());
+    assert_eq!(app.notice, "Attach at most 8 files at once");
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
+/// Dropping media the prompt holds already says so instead of counting
+/// nothing attached; the drop notices read in the interface language.
+#[test]
+fn dropping_an_attached_file_again_says_it_is_attached_already() {
+    let root = std::env::temp_dir().join(format!("haarness-drop-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&root).unwrap();
+    let as_dropped = |path: &std::path::Path| {
+        if cfg!(windows) {
+            format!("\"{}\"", path.display())
+        } else {
+            path.display().to_string().replace(' ', "\\ ")
+        }
+    };
+    let first = root.join("screen shot.png");
+    let second = root.join("diagram.png");
+    let readme = root.join("README.md");
+    std::fs::write(&first, b"png fixture").unwrap();
+    std::fs::write(&second, b"png fixture").unwrap();
+    std::fs::write(&readme, "# Notes\n").unwrap();
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+
+    app.paste_into_prompt(&as_dropped(&first), crate::media::Uploads::No);
+    assert_eq!(app.notice, "Attached 1 file · backspace removes");
+    app.paste_into_prompt(&as_dropped(&first), crate::media::Uploads::No);
+    assert_eq!(app.notice, "Already attached");
+    assert_eq!(app.attachments.len(), 1);
+    // The other files of such a drop still go in as text.
+    app.paste_into_prompt(
+        &format!("{} {}", as_dropped(&first), as_dropped(&readme)),
+        crate::media::Uploads::No,
+    );
+    assert_eq!(app.notice, "Already attached");
+    assert_eq!(app.composer.text(), as_dropped(&readme));
+    // Only what is new is counted.
+    app.paste_into_prompt(
+        &format!("{} {}", as_dropped(&first), as_dropped(&second)),
+        crate::media::Uploads::No,
+    );
+    assert_eq!(app.notice, "Attached 1 file · backspace removes");
+    assert_eq!(app.attachments.len(), 2);
+
+    app.language = crate::locale::Language::German;
+    app.attachments.clear();
+    app.paste_into_prompt(
+        &format!("{} {}", as_dropped(&first), as_dropped(&second)),
+        crate::media::Uploads::No,
+    );
+    assert_eq!(app.notice, "2 Dateien angehängt · backspace entfernt");
+    app.paste_into_prompt(&as_dropped(&second), crate::media::Uploads::No);
+    assert_eq!(app.notice, "Bereits angehängt");
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
 fn computer_event(
     thread: &Thread,
     id: &str,
@@ -28099,7 +28264,7 @@ async fn an_every_time_card_says_why_and_a_terminal_card_offers_always() {
         Some("com.apple.Terminal")
     );
 
-    // A server before terms version 2 marks terminals and editors: a click on their text asks every time and says
+    // A server before 0.1.20 marks terminals and editors: a click on their text asks every time and says
     // why, and nothing in them is offered for good.
     for (every_time, note) in [(true, true), (false, false)] {
         let mut app = App::new(thread.clone(), vec![thread.clone()], vec![], vec![], vec![]);

@@ -12,6 +12,7 @@ mod config;
 pub mod definitions;
 mod events;
 mod execution;
+pub mod glob_braces;
 mod goal;
 mod image_budget;
 pub mod images;
@@ -51,7 +52,7 @@ pub use background::{BackgroundHandoff, BackgroundProbe};
 pub use background_commands::{
     BACKGROUND_FILE_PREFIX, CommandOutput, CommandProcess, CommandRequest, CommandRun,
     OUTPUT_SAVED_LIMIT, OUTPUT_TAIL_KEPT, OutputPage, ProcessControl, ProcessEnd, ShellCall,
-    StopSignal, spoken_duration, whole_end, whole_start,
+    StopSignal, output_reference, spoken_duration, whole_end, whole_start,
 };
 pub use config::{CompactionSettings, CustomAgent, OutputStyle, RuntimeConfig};
 pub use events::{

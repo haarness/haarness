@@ -4,10 +4,9 @@
 
 use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
-use haarness_computer::{Computer, policy::Rule, terms};
+use haarness_computer::{Computer, policy::Rule};
 use haarness_protocol::{ManagementEntry as Entry, ManagementView as View};
 use serde_json::{Value, json};
-use std::io::{BufRead, IsTerminal, Write};
 
 #[derive(Debug, Clone, Args)]
 pub struct MacArgs {
@@ -23,14 +22,10 @@ enum MacCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Show the terms you agree to before turning computer use on.
-    Terms,
-    /// Switch computer use on, accepting the terms first if needed.
+    /// Let agents see and use this Mac.
     On,
     /// Stop agents from using this Mac.
     Off,
-    /// Withdraw your agreement to the terms; computer use stays off until you agree again.
-    Withdraw,
     /// Show macOS's permission prompts and open System Settings where you allow them.
     Permissions,
     /// Let agents act in an app without asking (a bundle id such as com.apple.TextEdit, or com.jetbrains.*).
@@ -80,21 +75,14 @@ pub async fn run(computer: &Computer, args: &MacArgs) -> Result<()> {
         .command
         .clone()
         .unwrap_or(MacCommand::Status { json: false });
-    match command {
-        MacCommand::Status { json } => {
-            let status = computer.status().await;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&status)?);
-            } else {
-                println!("{}", status_lines(&status).join("\n"));
-            }
-            return Ok(());
+    if let MacCommand::Status { json } = command {
+        let status = computer.status().await;
+        if json {
+            println!("{}", serde_json::to_string_pretty(&status)?);
+        } else {
+            println!("{}", status_lines(&status).join("\n"));
         }
-        MacCommand::Terms => {
-            println!("{}", terms::text());
-            return Ok(());
-        }
-        _ => {}
+        return Ok(());
     }
     if computer.widens(&request(&command)) && inside_haarness() {
         bail!(haarness_computer::INSIDE_REFUSAL);
@@ -104,16 +92,7 @@ pub async fn run(computer: &Computer, args: &MacArgs) -> Result<()> {
     }
     match command {
         MacCommand::On => {
-            if computer.settings().accepted() {
-                computer.enable(true).map_err(anyhow::Error::msg)?;
-            } else {
-                if !agree(computer.settings().terms_changed())? {
-                    bail!("Nothing changed: computer use is still off.");
-                }
-                computer
-                    .accept(terms::VERSION)
-                    .map_err(anyhow::Error::msg)?;
-            }
+            computer.enable(true).map_err(anyhow::Error::msg)?;
             let status = computer.status().await;
             println!("{}", status_lines(&status).join("\n"));
             let allowed = |key: &str| status["permissions"][key].as_bool() == Some(true);
@@ -127,12 +106,6 @@ pub async fn run(computer: &Computer, args: &MacArgs) -> Result<()> {
             computer.enable(false).map_err(anyhow::Error::msg)?;
             println!("Computer use is off. Agents no longer see or use this Mac.");
         }
-        MacCommand::Withdraw => {
-            computer.withdraw().map_err(anyhow::Error::msg)?;
-            println!(
-                "Agreement withdrawn. Computer use stays off until you accept the terms again."
-            );
-        }
         MacCommand::Permissions => {
             computer
                 .request_permissions()
@@ -145,7 +118,7 @@ pub async fn run(computer: &Computer, args: &MacArgs) -> Result<()> {
         MacCommand::Ask { app } => set(computer, &app, Some(Rule::Ask))?,
         MacCommand::Deny { app } => set(computer, &app, Some(Rule::Deny))?,
         MacCommand::Forget { app } => set(computer, &app, None)?,
-        MacCommand::Status { .. } | MacCommand::Terms => unreachable!("handled above"),
+        MacCommand::Status { .. } => unreachable!("handled above"),
     }
     Ok(())
 }
@@ -162,40 +135,6 @@ fn set(computer: &Computer, app: &str, rule: Option<Rule>) -> Result<()> {
         }
     );
     Ok(())
-}
-
-/// What a person who agreed to earlier terms reads beside today's, where they agree.
-const TERMS_CHANGED: &str = "You agreed to an earlier version of these terms.";
-
-/// The same, as the description of `/mac`'s agree entry, which has room for a few words.
-const TERMS_CHANGED_ENTRY: &str = "You agreed to an earlier version";
-
-/// Prints the terms and waits for the person to type "I agree"; any other reply, or a non-interactive stdin,
-/// counts as no. `changed`: the person agreed to earlier terms, which is said before the question.
-fn agree(changed: bool) -> Result<bool> {
-    println!("{}\n", terms::text());
-    if changed {
-        println!("{TERMS_CHANGED}");
-    }
-    if !std::io::stdin().is_terminal() {
-        eprintln!(
-            "Agreeing needs you at an interactive terminal: run haarness mac on in Terminal yourself."
-        );
-        return Ok(false);
-    }
-    print!("Type \"I agree\" to agree and turn computer use on, or press Return to leave it off: ");
-    std::io::stdout().flush()?;
-    let mut answer = String::new();
-    std::io::stdin().lock().read_line(&mut answer)?;
-    Ok(answer.trim().eq_ignore_ascii_case("i agree"))
-}
-
-fn yes(value: &Value) -> &'static str {
-    if value.as_bool() == Some(true) {
-        "yes"
-    } else {
-        "no"
-    }
 }
 
 fn host_name(status: &Value) -> String {
@@ -218,13 +157,6 @@ pub fn status_lines(status: &Value) -> Vec<String> {
             "off"
         }
     )];
-    lines.push(format!(
-        "Terms accepted: {1} (version {0})",
-        status["terms"]["version"]
-            .as_str()
-            .unwrap_or(terms::VERSION),
-        yes(&status["terms"]["accepted"])
-    ));
     if status["console"].as_bool() != Some(true) {
         lines.push("This Mac's screen belongs to another user, or nobody is signed in, so agents can't use it from this account.".into());
     }
@@ -288,26 +220,7 @@ fn allowed(value: Option<&Value>) -> &'static str {
 pub fn view(status: Value) -> View {
     let mut lines = Vec::new();
     let mut entries = Vec::new();
-    if status["supported"].as_bool() != Some(true) {
-        lines.push("Computer use gives agents this Mac's screen, mouse and keyboard. It is available on macOS, in Haarness builds that ship the helper.".into());
-    } else if status["terms"]["accepted"].as_bool() != Some(true) {
-        lines.extend(terms::text().lines().map(str::to_owned));
-        entries.push(Entry {
-            label: "Agree to the terms and turn on".into(),
-            // Said where the person agrees, when they agreed to earlier terms.
-            description: if status["terms"]["changed"] == true {
-                TERMS_CHANGED_ENTRY
-            } else {
-                "Agents get the mac_* tools from their next turn"
-            }
-            .into(),
-            request: json!({"action": "accept", "version": terms::VERSION}),
-            confirm: Some(
-                "Agree to the terms for computer use and let agents use this Mac?".into(),
-            ),
-            icon: None,
-        });
-    } else {
+    if status["supported"].as_bool() == Some(true) {
         lines.extend(status_lines(&status));
         let on = status["enabled"].as_bool() == Some(true);
         entries.push(Entry {
@@ -369,13 +282,8 @@ pub fn view(status: Value) -> View {
                 icon: None,
             });
         }
-        entries.push(Entry {
-            label: "Withdraw agreement".into(),
-            description: "Switches computer use off until the terms are accepted again".into(),
-            request: json!({"action": "withdraw"}),
-            confirm: Some("Withdraw your agreement and turn computer use off?".into()),
-            icon: None,
-        });
+    } else {
+        lines.push("Computer use gives agents this Mac's screen, mouse and keyboard. It is available on macOS, in Haarness builds that ship the helper.".into());
     }
     View {
         title: "Computer use".into(),
@@ -390,12 +298,12 @@ pub fn view(status: Value) -> View {
 mod tests {
     use super::*;
 
-    fn status(accepted: bool, enabled: bool) -> Value {
+    fn status(enabled: bool) -> Value {
         json!({
             "supported": true,
             "console": true,
             "enabled": enabled,
-            "terms": {"version": "1", "accepted": accepted},
+            "terms": {"version": "2", "accepted": true, "acceptedAt": null, "changed": false},
             "permissions": {"accessibility": true, "screenRecording": false},
             "host": {"bundle": "com.apple.Terminal", "name": "Terminal"},
             "settings": {"defaultAct": "ask", "ring": true, "apps": [{"bundle": "com.apple.TextEdit", "name": "TextEdit", "rule": "allow"}]},
@@ -403,36 +311,33 @@ mod tests {
     }
 
     #[test]
-    fn before_agreeing_the_view_shows_the_terms_and_one_way_on() {
-        let view = view(status(false, false));
+    fn off_the_view_turns_on_in_one_step_with_nothing_to_agree_to() {
+        let view = view(status(false));
+        assert_eq!(view.lines[0], "Computer use: off");
         assert!(
-            view.lines
+            !view
+                .lines
                 .iter()
-                .any(|line| line.contains("Don't use it for"))
+                .any(|line| line.to_lowercase().contains("terms")),
+            "{:?}",
+            view.lines
         );
-        assert_ne!(view.entries[0].description, TERMS_CHANGED_ENTRY);
-        assert_eq!(view.entries.len(), 1);
-        assert_eq!(view.entries[0].request["action"], "accept");
-        assert!(view.entries[0].confirm.is_some());
-    }
-
-    #[test]
-    fn after_the_terms_changed_the_agree_entry_says_so_and_agreeing_is_one_step() {
-        let mut changed = status(false, true);
-        changed["terms"]["changed"] = json!(true);
-        let view = view(changed);
-        assert_eq!(view.lines[0], terms::TITLE);
-        assert_eq!(view.entries.len(), 1);
-        assert_eq!(view.entries[0].description, TERMS_CHANGED_ENTRY);
+        assert_eq!(view.entries[0].label, "Turn on");
         assert_eq!(
             view.entries[0].request,
-            json!({"action": "accept", "version": terms::VERSION})
+            json!({"action": "enable", "enabled": true})
         );
+        assert!(view.entries[0].confirm.is_none());
+        assert!(view.entries.iter().all(|entry| {
+            entry.confirm.is_none()
+                && !["accept", "withdraw"]
+                    .contains(&entry.request["action"].as_str().unwrap_or_default())
+        }));
     }
 
     #[test]
-    fn once_agreed_the_view_names_the_app_macos_asks_about() {
-        let view = view(status(true, true));
+    fn on_the_view_names_the_app_macos_asks_about_and_turns_off_in_one_step() {
+        let view = view(status(true));
         assert!(
             view.lines
                 .iter()
@@ -446,5 +351,26 @@ mod tests {
         assert!(view.entries.iter().any(|entry| entry.request
             == json!({"action": "app", "bundle": "com.apple.TextEdit", "rule": "clear"})));
         assert_eq!(view.entries[0].label, "Turn off");
+        assert_eq!(
+            view.entries[0].request,
+            json!({"action": "enable", "enabled": false})
+        );
+        assert!(view.entries[0].confirm.is_none());
+    }
+
+    #[test]
+    fn mac_has_no_terms_or_withdraw_command() {
+        use clap::Parser;
+        #[derive(Parser)]
+        struct Cli {
+            #[command(flatten)]
+            mac: MacArgs,
+        }
+        for gone in ["terms", "withdraw"] {
+            assert!(Cli::try_parse_from(["mac", gone]).is_err(), "{gone}");
+        }
+        for kept in ["on", "off", "status", "permissions"] {
+            assert!(Cli::try_parse_from(["mac", kept]).is_ok(), "{kept}");
+        }
     }
 }

@@ -2,6 +2,38 @@
   "comment": "Haarness's reviewed model prices, USD per million tokens, each checked against the provider's own price page on the date given. Cloud bills a listed model at these prices; any other model is priced from OpenRouter's catalogue. The app embeds an identical copy (crates/haarness-providers/src/model-prices.json in the haarness repo). cache_write is the 5-minute write price, or the input price where the provider charges nothing extra; long_context applies to a whole request whose prompt is over above_input_tokens. changes schedules a provider's announced price changes: each lists every rate billed from 00:00 UTC on its from date, long_context included (a change without one ends the tier), and the latest change whose date has come replaces the entry's own rates. Re-check entries by hand: scripts/check-model-prices.py in the haarness repo lists differences from OpenRouter and entries due for a check.",
   "models": [
     {
+      "id": "openai/gpt-6.2-astra",
+      "input": "8",
+      "output": "40",
+      "cache_read": "0.4",
+      "cache_write": "10",
+      "long_context": {
+        "above_input_tokens": 272000,
+        "input": "16",
+        "output": "60",
+        "cache_read": "0.8",
+        "cache_write": "20"
+      },
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "checked": "2026-11-19"
+    },
+    {
+      "id": "openai/gpt-6.2-sol",
+      "input": "2",
+      "output": "10",
+      "cache_read": "0.1",
+      "cache_write": "2.5",
+      "long_context": {
+        "above_input_tokens": 272000,
+        "input": "4",
+        "output": "15",
+        "cache_read": "0.2",
+        "cache_write": "5"
+      },
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "checked": "2026-11-19"
+    },
+    {
       "id": "openai/gpt-6-astra",
       "input": "10",
       "output": "50",
@@ -32,6 +64,22 @@
       },
       "source": "https://developers.openai.com/api/docs/pricing",
       "checked": "2026-10-10"
+    },
+    {
+      "id": "openai/gpt-6.1-terra",
+      "input": "1",
+      "output": "5",
+      "cache_read": "0.05",
+      "cache_write": "1.25",
+      "long_context": {
+        "above_input_tokens": 272000,
+        "input": "2",
+        "output": "7.5",
+        "cache_read": "0.1",
+        "cache_write": "2.5"
+      },
+      "source": "https://developers.openai.com/api/docs/pricing",
+      "checked": "2026-11-19"
     },
     {
       "id": "openai/gpt-6-sol",
@@ -133,6 +181,24 @@
       "source": "https://developers.openai.com/api/docs/pricing",
       "checked": "2026-10-10",
       "note": "No separate cache-write price: writes cost the input rate."
+    },
+    {
+      "id": "anthropic/claude-fable-5.2",
+      "input": "8",
+      "output": "40",
+      "cache_read": "0.2",
+      "cache_write": "10",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "checked": "2026-11-19"
+    },
+    {
+      "id": "anthropic/claude-mythos-5.2",
+      "input": "8",
+      "output": "40",
+      "cache_read": "0.2",
+      "cache_write": "10",
+      "source": "https://platform.claude.com/docs/en/about-claude/pricing",
+      "checked": "2026-11-19"
     },
     {
       "id": "anthropic/claude-fable-5.1",
@@ -285,6 +351,45 @@
       "cache_write": "1.25",
       "source": "https://platform.claude.com/docs/en/about-claude/pricing",
       "checked": "2026-10-10"
+    },
+    {
+      "id": "google/gemini-4-neon",
+      "input": "3",
+      "output": "15",
+      "cache_read": "0.15",
+      "cache_write": "3",
+      "source": "https://ai.google.dev/gemini-api/docs/pricing",
+      "checked": "2026-11-19",
+      "note": "Implicit caching only, no long-context tier."
+    },
+    {
+      "id": "google/gemini-4-hydrogen",
+      "input": "1.5",
+      "output": "7.5",
+      "cache_read": "0.075",
+      "cache_write": "1.5",
+      "source": "https://ai.google.dev/gemini-api/docs/pricing",
+      "checked": "2026-11-19",
+      "note": "Implicit caching only, no long-context tier."
+    },
+    {
+      "id": "google/gemini-4-carbon",
+      "input": "2",
+      "output": "10",
+      "cache_read": "0.1",
+      "cache_write": "2",
+      "changes": [
+        {
+          "from": "2026-12-01",
+          "input": "4",
+          "output": "20",
+          "cache_read": "0.2",
+          "cache_write": "4"
+        }
+      ],
+      "source": "https://ai.google.dev/gemini-api/docs/pricing",
+      "checked": "2026-11-19",
+      "note": "Implicit caching only, no long-context tier."
     },
     {
       "id": "google/gemini-4-argon",

@@ -121,6 +121,25 @@ but never a provider's page: confirming a price is a person's job. Fix or add th
 entry in haarness-cloud from the provider's page with today's `checked` date,
 then `--sync` copies the table here.
 
+## New models: 2026-11-19
+
+New since the last update: Gemini 4 Neon, Hydrogen and Carbon, GPT-6.2 Sol and Astra,
+GPT-6.1 Terra, and Claude Fable and Mythos 5.2. Each is named, priced from the provider's
+own price page and in the fallback lists; the facts below were probed against the live
+APIs.
+
+| Provider | Change |
+| --- | --- |
+| Gemini | Neon and Hydrogen think at `low`, `medium`, `high` and `xhigh`; Carbon, like Argon, at `low`, `medium` and `high`, and answers `xhigh` with a 400. None of the Gemini 4 models takes `minimal`. A `max` effort goes to Neon and Hydrogen as `xhigh` and to the others as `high`. Hydrogen is Gemini 4's fast model and has a free tier, so a new Gemini connection, and a chat that names no Gemini model, now starts on it instead of Gemini 3.8 Flash; Carbon, Neon and Argon follow, in that order in the pickers. A free-tier key refused a paid model is pointed to Hydrogen and the Flash models. Gemini 3.7 Flash, which Google now answers with 3.8 Flash, left the fallback list; it stays listed while Google lists it. Prices: Neon $3/$15, Hydrogen $1.50/$7.50, Carbon $2/$10 through 2026-11-30 and $4/$20 from 2026-12-01 (scheduled in `changes`), cached input a twentieth of input, no long-context tier. |
+| Vertex AI | With an API key and no project, Google answers the project-less endpoint from one of the key's project's regional locations (asia-southeast1 for the key tried), where Neon, Hydrogen and Carbon are not served: "Publisher model `projects/…/locations/asia-southeast1/…/gemini-4-neon` was not found". The refusal names the project, so the request goes again to that project's global location, which serves them, and later requests go there at once; a pasted key is checked the same way. Before, these three models failed on every key-only Vertex connection. The fallback list, used because Vertex lists no models for a key, starts on Hydrogen and has the whole Gemini 4 family. |
+| OpenAI | GPT-6.2 reads top-level `instructions` after `input` and never caches them: a repeated 4,962-token system prompt cached nothing that way and 4,950 tokens sent as a developer message at the start of `input`, through an API key and a ChatGPT sign-in alike. GPT-6.2 and later now get the system prompt as that developer message; GPT-6.1 still caches `instructions` and earlier models keep them. GPT-6.2 Sol and Astra take `low` to `max` (not `none` or `minimal`) and no `temperature`, which the version rules already gave them. Sol leads the fallback list. Prices: Sol $2/$10 (cached $0.10), Astra $8/$40 (cached $0.40), Terra $1/$5 (cached $0.05), each doubling input and adding half to output above 272K input tokens. A ChatGPT sign-in lists all three in its own catalog. |
+| Anthropic, Bedrock, Vertex | Claude Fable 5.2 and Mythos 5.2 ($8/$40, cache reads $0.20, 5-minute writes $10) get every rule of Fable 5.1: adaptive thinking only, effort `low` to `max`, native JSON output instead of a forced tool choice, prompt-bound thinking and notes before tool calls, in every vendor spelling. Fable 5.2 is in the fallback list after Haiku 5.5. |
+
+Not added: Gemini Decision 1 (its own Decisions API), the Omni video models, Gemini 3.5
+Transcribe and the speech models stay out of the chat pickers by the existing name rules;
+GPT-6 Cyber and GPT-6 Rosalind are for approved organizations only and appear when an
+account's catalog lists them.
+
 ## Claude's notes before tool calls: 2026-11-13
 
 | Provider | Change |

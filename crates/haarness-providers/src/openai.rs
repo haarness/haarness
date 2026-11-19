@@ -731,7 +731,15 @@ impl ModelProvider for OpenAiProvider {
             };
             input.push(value);
         }
-        let mut body = json!({"model": model, "instructions": request.system, "input": input, "tools": tools, "stream": true, "store": false, "include": ["reasoning.encrypted_content"]});
+        let mut body = json!({"model": model, "input": input, "tools": tools, "stream": true, "store": false, "include": ["reasoning.encrypted_content"]});
+        if !system_leads_input(model) {
+            body["instructions"] = json!(request.system);
+        } else if !request.system.is_empty() {
+            body["input"]
+                .as_array_mut()
+                .expect("input is an array")
+                .insert(0, json!({"role": "developer", "content": request.system}));
+        }
         if structured_output.is_some() {
             body["tool_choice"] = json!("required");
         }
@@ -801,6 +809,7 @@ impl ModelProvider for OpenAiProvider {
         while !response.status().is_success() {
             let status = response.status();
             let headers = response.headers().clone();
+            let answered = response.url().clone();
             let trace = crate::RequestTrace::of(&response);
             let text = crate::sse::within(limits.idle(false), response.text())
                 .await?
@@ -837,7 +846,11 @@ impl ModelProvider for OpenAiProvider {
             return Err(subscription
                 .then(|| chatgpt_plan_refusal(&headers, &text, unix_millis() / 1000))
                 .flatten()
-                .unwrap_or_else(|| crate::sse::status_error(status, &headers, &text)));
+                .unwrap_or_else(|| {
+                    // A ChatGPT sign-in's address is not the person's to set.
+                    let route = (!subscription).then(|| crate::sse::Route::plain("/responses"));
+                    crate::sse::status_error(status, &headers, &answered, route, &text)
+                }));
         }
         let plan_headers = subscription.then(|| response.headers().clone());
         let trace = crate::RequestTrace::of(&response);
@@ -963,6 +976,20 @@ fn openai_version(id: &str) -> Option<OpenAiVersion> {
     (rest.len() == digits || rest[digits..].starts_with('-')).then_some(OpenAiVersion::O(number))
 }
 
+/// Whether the system prompt goes as the first item of `input`, a developer
+/// message, rather than as top-level `instructions`. GPT-6.2 and later read
+/// `instructions` after `input` and never cache them: a repeated 4,962-token
+/// prompt cached nothing as `instructions` and 4,950 tokens as a developer
+/// message, through an API key and a ChatGPT sign-in alike (probed
+/// 2026-11-19). GPT-6.1 still caches `instructions`, so earlier models keep
+/// them.
+fn system_leads_input(model: &str) -> bool {
+    matches!(
+        openai_version(model),
+        Some(OpenAiVersion::Gpt { major, minor }) if (major, minor.unwrap_or(0)) >= (6, 2)
+    )
+}
+
 /// Whether an id reasons: GPT-5 and every later GPT, and the o-series.
 pub(crate) fn openai_reasons(id: &str) -> bool {
     match openai_version(id) {
@@ -1058,7 +1085,10 @@ fn model(id: &str, reasoning: bool) -> ModelInfo {
 }
 pub(crate) fn preferred_models() -> Vec<ModelInfo> {
     vec![
+        model("gpt-6.2-sol", true),
+        model("gpt-6.2-astra", true),
         model("gpt-6.1-sol", true),
+        model("gpt-6.1-terra", true),
         model("gpt-6-astra", true),
         model("gpt-6-sol", true),
         model("gpt-6-luna", true),
@@ -1319,6 +1349,7 @@ mod tests {
 
     use super::{
         OpenAiProvider, RequestAuth, openai_reasoning_efforts, request_model, supports_responses,
+        system_leads_input,
     };
 
     type AuthHeaderCapture = (String, Option<String>, Option<String>);
@@ -1588,7 +1619,7 @@ mod tests {
         // serve are offered.
         let fallback = provider.info().models;
         assert!(fallback.iter().any(|model| model.id == "gpt-6-astra"));
-        assert_eq!(fallback[0].id, "gpt-6.1-sol");
+        assert_eq!(fallback[0].id, "gpt-6.2-sol");
         // GPT-5.4 never ran on ChatGPT; GPT-5.5 retires there on 2026-10-14.
         assert!(
             fallback
@@ -2286,6 +2317,55 @@ mod tests {
         assert_eq!(tool["parameters"]["type"], "object");
         assert!(tool["parameters"].get("$schema").is_none());
     }
+    #[tokio::test]
+    async fn gpt_6_2_gets_the_system_prompt_as_a_leading_developer_message() {
+        let state = FixtureState::default();
+        let router = Router::new()
+            .route("/responses", post(responses))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let provider = OpenAiProvider::for_test(format!("http://{address}/responses"), "test");
+        for model in ["gpt-6.2-sol", "gpt-7", "gpt-6.1-sol"] {
+            let stream = provider
+                .stream(
+                    ProviderRequest {
+                        model: model.into(),
+                        system: "Be brief.".into(),
+                        messages: vec![ProviderMessage::Text {
+                            role: "user".into(),
+                            content: "hello".into(),
+                        }],
+                        tools: Vec::new(),
+                        reasoning_effort: Some("high".into()),
+                        parameters: haarness_core::RequestParameters::default(),
+                        output_schema: None,
+                    },
+                    CancellationToken::new(),
+                )
+                .await
+                .unwrap();
+            let _ = stream.collect::<Vec<_>>().await;
+        }
+        let requests = state.requests.lock();
+        for request in &requests[..2] {
+            assert!(request.get("instructions").is_none(), "{request}");
+            assert_eq!(
+                request["input"][0],
+                json!({"role": "developer", "content": "Be brief."})
+            );
+            assert_eq!(request["input"][1]["role"], "user");
+        }
+        // GPT-6.1 still caches top-level instructions.
+        assert_eq!(requests[2]["instructions"], "Be brief.");
+        assert_eq!(requests[2]["input"][0]["role"], "user");
+        assert!(system_leads_input("gpt-6.2-astra"));
+        assert!(!system_leads_input("gpt-6-astra"));
+        assert!(!system_leads_input("o4-mini"));
+        assert!(!system_leads_input("team-model"));
+    }
+
     #[tokio::test]
     async fn discovery_uses_stored_api_credentials_and_live_limits() {
         async fn list(headers: HeaderMap) -> Json<Value> {

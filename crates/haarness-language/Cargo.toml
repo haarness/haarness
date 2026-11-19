@@ -9,6 +9,7 @@ license.workspace = true
 dunce.workspace = true
 futures.workspace = true
 haarness-core = { path = "../haarness-core" }
+haarness-ripgrep = { path = "../haarness-ripgrep" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

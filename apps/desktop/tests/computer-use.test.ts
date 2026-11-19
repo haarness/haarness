@@ -11,6 +11,7 @@ import {
   pausedChatIn,
   pausedHere,
   shownText,
+  switchRequest,
   validBundle,
   waitsOnScreen,
 } from "../src/renderer/computer-use";
@@ -18,6 +19,7 @@ import { describeTool, toolActivity, toolInput } from "../src/renderer/transcrip
 import { readToolImage, screenToolImage } from "../src/renderer/project-images";
 import { canAutoApprove } from "../src/renderer/approval-mode";
 import { toolGroups } from "../src/renderer/settings-lists";
+import { settingsControls, settingsKeywords } from "../src/renderer/settings-catalog";
 import { dictionaries } from "../src/localization";
 
 const root = "/Users/sam/work/app";
@@ -124,7 +126,7 @@ test("a request that asks every time offers nothing lasting and says why", () =>
   assert.equal(terminal.always?.label, "Always allow Terminal");
   assert.equal(terminal.always?.bundle, "com.apple.Terminal");
   assert.deepEqual(terminal.notes, []);
-  // A server before terms version 2 marks terminals and editors: its cards say why they ask every time, and offer
+  // A server before 0.1.20 marks terminals and editors: its cards say why they ask every time, and offer
   // nothing for good.
   const older = computerApproval(request({ kind: "act", app: "Terminal", console: true, everyTime: true }, false), english);
   assert.equal(older.inChat, null);
@@ -316,4 +318,30 @@ test("every computer use word Desktop shows is in the catalog", () => {
     computerUseKeys.filter((key) => !Object.hasOwn(dictionaries.en, key)),
     [],
   );
+});
+
+test("the switch turns computer use on and off in one step, accepting an earlier server's terms on the way", () => {
+  const today = { terms: { version: "2", accepted: true } };
+  assert.deepEqual(switchRequest(today, true), { action: "enable", enabled: true });
+  assert.deepEqual(switchRequest(today, false), { action: "enable", enabled: false });
+  assert.deepEqual(switchRequest({}, true), { action: "enable", enabled: true });
+  // A server that still asks for terms: switching on accepts the version it names, and switching off stays off.
+  const earlier = { terms: { version: "2", accepted: false } };
+  assert.deepEqual(switchRequest(earlier, true), { action: "accept", version: "2" });
+  assert.deepEqual(switchRequest(earlier, false), { action: "enable", enabled: false });
+});
+
+test("Settings search finds no terms, agreement or withdrawal under Computer use", () => {
+  const words = [
+    settingsKeywords.computer,
+    ...settingsControls.filter(([section]) => section === "computer").flatMap(([, title, keywords]) => [title, keywords]),
+  ].join(" ");
+  assert.doesNotMatch(words, /terms|agree|withdraw/i);
+});
+
+test("the catalogs keep no sentence of the computer use terms", () => {
+  const leftovers = Object.keys(dictionaries.en).filter((key) =>
+    /your responsibility|these terms|Withdraw agreement|Terms for computer use|Agree and turn on|Use it for$/.test(key),
+  );
+  assert.deepEqual(leftovers, []);
 });

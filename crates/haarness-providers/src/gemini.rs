@@ -170,7 +170,7 @@ impl GeminiProvider {
                 .as_str()
                 .filter(|token| !token.is_empty())
             else {
-                return Some(flash_first(crate::merge_discovered_models(
+                return Some(free_tier_first(crate::merge_discovered_models(
                     self.models.clone(),
                     models,
                 )));
@@ -419,10 +419,15 @@ fn gemini_version(id: &str) -> Option<(u32, u32)> {
 /// it began).
 fn thinking_config(model: &str, effort: &str, output_limit: Option<u64>) -> Option<Value> {
     if uses_thinking_level(model) {
+        let levels = gemini_reasoning_efforts(model);
         let level = match effort {
-            "none" | "minimal" if gemini_reasoning_efforts(model).contains(&"minimal") => "minimal",
+            "none" | "minimal" if levels.contains(&"minimal") => "minimal",
             "none" | "minimal" | "low" => "low",
             "medium" => "medium",
+            "high" => "high",
+            // `max` and any stronger word a client sends go as the
+            // strongest level the model takes.
+            _ if levels.contains(&"xhigh") => "xhigh",
             _ => "high",
         };
         return Some(json!({"thinkingLevel":level,"includeThoughts":true}));
@@ -470,10 +475,16 @@ pub(crate) fn uses_thinking_level(id: &str) -> bool {
 /// whether a model thinks, so the version decides: Gemini 4 Argon answers
 /// `minimal` with a 400, as Flash from 3.7 and Pro from 3.1 do, and every
 /// later version is assumed to follow them; Pro before 3.1 takes low or high.
+/// Of Gemini 4, Neon and Hydrogen also take `xhigh`, which Argon and Carbon
+/// answer with a 400 (probed 2026-11-19 on the Gemini API and Vertex).
 pub(crate) fn gemini_reasoning_efforts(id: &str) -> Vec<&'static str> {
     let name = id.rsplit('/').next().unwrap_or(id);
-    let pro = name.split(['-', '.']).any(|part| part == "pro");
+    let segment = |word: &str| name.split(['-', '.']).any(|part| part == word);
+    let pro = segment("pro");
     match gemini_version(name) {
+        Some(version) if version >= (4, 0) && (segment("neon") || segment("hydrogen")) => {
+            vec!["low", "medium", "high", "xhigh"]
+        }
         Some(version) if version >= (3, 7) || (pro && version >= (3, 1)) => {
             vec!["low", "medium", "high"]
         }
@@ -594,38 +605,45 @@ fn supports_harness_chat(id: &str) -> bool {
             .any(|word| segments.contains(&format!("-{word}-")))
 }
 
-/// The newest Flash model's version, when `id` names one: `gemini-3.8-flash`
-/// is (3, 8); a Lite, preview, dated or otherwise varied Flash is not.
-fn flash_version(id: &str) -> Option<(u32, u32)> {
-    let version = id.strip_prefix("gemini-")?.strip_suffix("-flash")?;
+/// The version of a model a free Google AI Studio key can use, when `id`
+/// names one: `gemini-3.8-flash` is (3, 8) and `gemini-4-hydrogen` (4, 0); a
+/// Lite, preview, dated or otherwise varied model is not. Hydrogen is Gemini
+/// 4's fast model and has a free tier, as Flash had before it.
+fn free_tier_version(id: &str) -> Option<(u32, u32)> {
+    let name = id.strip_prefix("gemini-")?;
+    let version = name
+        .strip_suffix("-flash")
+        .or_else(|| name.strip_suffix("-hydrogen"))?;
     let (major, minor) = version.split_once('.').unwrap_or((version, "0"));
     Some((major.parse().ok()?, minor.parse().ok()?))
 }
 
-/// The models with Google's newest Flash model first, the rest in their
+/// The models with Google's newest free-tier model first, the rest in their
 /// order. A new connection, and a chat that names no model, starts on the
-/// first model of the list: Flash works on a free Google AI Studio key,
-/// where Gemini 4 Argon (the most capable, listed next) has no free tier
-/// and fails the first message. A model someone chose stays chosen.
-fn flash_first(mut models: Vec<ModelInfo>) -> Vec<ModelInfo> {
+/// first model of the list: Gemini 4 Hydrogen (or, before it, Flash) works on
+/// a free Google AI Studio key, where Neon, Carbon and Argon have no free
+/// tier and fail the first message. A model someone chose stays chosen.
+fn free_tier_first(mut models: Vec<ModelInfo>) -> Vec<ModelInfo> {
     let newest = models
         .iter()
         .enumerate()
-        .filter_map(|(index, model)| Some((flash_version(&model.id)?, index)))
+        .filter_map(|(index, model)| Some((free_tier_version(&model.id)?, index)))
         .max_by_key(|(version, index)| (*version, std::cmp::Reverse(*index)))
         .map(|(_, index)| index);
     if let Some(index) = newest {
-        let flash = models.remove(index);
-        models.insert(0, flash);
+        let free = models.remove(index);
+        models.insert(0, free);
     }
     models
 }
 
 pub(crate) fn preferred_models() -> Vec<ModelInfo> {
-    flash_first(vec![
+    free_tier_first(vec![
+        model("gemini-4-carbon"),
+        model("gemini-4-neon"),
         model("gemini-4-argon"),
+        model("gemini-4-hydrogen"),
         model("gemini-3.8-flash"),
-        model("gemini-3.7-flash"),
         model("gemini-3.6-flash"),
         model("gemini-3.5-flash"),
         model("gemini-3.5-flash-lite"),
@@ -996,45 +1014,69 @@ data: {"responseId":"response-1","candidates":[{"content":{"role":"model"},"fini
     }
 
     #[test]
-    fn a_new_connection_starts_on_the_newest_flash_and_keeps_argon_choosable() {
+    fn a_new_connection_starts_on_the_newest_free_tier_model_and_keeps_the_rest_choosable() {
         let ids = |models: Vec<haarness_protocol::ModelInfo>| -> Vec<String> {
             models.into_iter().map(|model| model.id).collect()
         };
-        // Before discovery: Flash, then Argon and the rest as listed.
+        // Before discovery: Hydrogen, then Gemini 4's paid models and the
+        // rest as listed.
         let listed = ids(super::preferred_models());
-        assert_eq!(listed[..2], ["gemini-3.8-flash", "gemini-4-argon"]);
-        assert_eq!(listed.len(), 12);
-        // A newer Flash Google lists leads; Lite, preview and dated Flash
-        // models never do.
+        assert_eq!(
+            listed[..5],
+            [
+                "gemini-4-hydrogen",
+                "gemini-4-carbon",
+                "gemini-4-neon",
+                "gemini-4-argon",
+                "gemini-3.8-flash"
+            ]
+        );
+        assert_eq!(listed.len(), 14);
+        assert!(!listed.iter().any(|id| id == "gemini-3.7-flash"));
+        // A newer free-tier model Google lists leads, a Hydrogen before a
+        // Flash of an older generation; Lite, preview and dated models never
+        // do.
         let models = [
-            "gemini-4-argon",
+            "gemini-4-neon",
+            "gemini-4-hydrogen",
             "gemini-3.8-flash",
+            "gemini-4.1-hydrogen-preview",
+            "gemini-4.1-hydrogen-001",
             "gemini-3.9-flash-lite",
-            "gemini-3.9-flash-preview",
-            "gemini-3.9-flash-001",
-            "gemini-3.9-flash",
-            "gemini-3.7-flash",
         ];
-        let found = super::flash_first(models.iter().map(|id| super::model(id)).collect());
+        let found = super::free_tier_first(models.iter().map(|id| super::model(id)).collect());
         assert_eq!(
             ids(found),
             [
-                "gemini-3.9-flash",
-                "gemini-4-argon",
+                "gemini-4-hydrogen",
+                "gemini-4-neon",
                 "gemini-3.8-flash",
+                "gemini-4.1-hydrogen-preview",
+                "gemini-4.1-hydrogen-001",
                 "gemini-3.9-flash-lite",
-                "gemini-3.9-flash-preview",
-                "gemini-3.9-flash-001",
-                "gemini-3.7-flash"
             ]
         );
-        // Without a Flash model the list is left as it is.
-        let other = ids(super::flash_first(vec![
+        let found = ids(super::free_tier_first(vec![
+            super::model("gemini-4-argon"),
+            super::model("gemini-3.8-flash"),
+            super::model("gemini-3.9-flash"),
+        ]));
+        assert_eq!(
+            found,
+            ["gemini-3.9-flash", "gemini-4-argon", "gemini-3.8-flash"]
+        );
+        // Without a free-tier model the list is left as it is.
+        let other = ids(super::free_tier_first(vec![
             super::model("gemini-4-argon"),
             super::model("gemini-3.1-pro-preview"),
         ]));
         assert_eq!(other, ["gemini-4-argon", "gemini-3.1-pro-preview"]);
-        assert_eq!(super::flash_version("gemini-4-flash"), Some((4, 0)));
+        assert_eq!(super::free_tier_version("gemini-4-flash"), Some((4, 0)));
+        assert_eq!(
+            super::free_tier_version("gemini-4.1-hydrogen"),
+            Some((4, 1))
+        );
+        assert_eq!(super::free_tier_version("gemini-4-neon"), None);
     }
 
     #[tokio::test]
@@ -1140,6 +1182,18 @@ data: {"responseId":"response-1","candidates":[{"content":{"role":"model"},"fini
             ),
             ("gemini-3.8-flash", true, &["low", "medium", "high"]),
             ("gemini-4-argon", true, &["low", "medium", "high"]),
+            ("gemini-4-carbon", true, &["low", "medium", "high"]),
+            ("gemini-4-neon", true, &["low", "medium", "high", "xhigh"]),
+            (
+                "models/gemini-4-hydrogen",
+                true,
+                &["low", "medium", "high", "xhigh"],
+            ),
+            (
+                "gemini-4.1-hydrogen",
+                true,
+                &["low", "medium", "high", "xhigh"],
+            ),
             ("gemini-4.1-flash", true, &["low", "medium", "high"]),
             ("models/gemini-12-pro", true, &["low", "medium", "high"]),
         ] {
@@ -1214,6 +1268,25 @@ data: {"responseId":"response-1","candidates":[{"content":{"role":"model"},"fini
             thinking_config("gemini-3-flash-preview", "minimal", Some(2048)),
             Some(json!({"thinkingLevel": "minimal", "includeThoughts": true}))
         );
+    }
+
+    #[test]
+    fn neon_and_hydrogen_think_at_xhigh_and_the_other_gemini_4_models_at_high() {
+        let level = |model: &str, effort: &str| {
+            thinking_config(model, effort, None).unwrap()["thinkingLevel"].clone()
+        };
+        for model in ["gemini-4-neon", "gemini-4-hydrogen"] {
+            assert_eq!(level(model, "xhigh"), "xhigh", "{model}");
+            assert_eq!(level(model, "max"), "xhigh", "{model}");
+            assert_eq!(level(model, "high"), "high", "{model}");
+            assert_eq!(level(model, "minimal"), "low", "{model}");
+        }
+        // Argon and Carbon answer `xhigh` with a 400.
+        for model in ["gemini-4-carbon", "gemini-4-argon", "gemini-3.8-flash"] {
+            assert_eq!(level(model, "xhigh"), "high", "{model}");
+            assert_eq!(level(model, "max"), "high", "{model}");
+            assert_eq!(level(model, "none"), "low", "{model}");
+        }
     }
 
     #[tokio::test]

@@ -175,8 +175,10 @@ def main():
             texts = [item['data'].get('text', '') for item in items if item['data']['type'] == 'assistant_message']
             reasoning = ''.join(item['data'].get('text', '') for item in items if item['data']['type'] == 'reasoning')
             assert texts and '654' in texts[-1], 'Wrong or missing answer: '+(texts[-1][:200] if texts else '')
-            # OpenAI's `auto` summaries may be empty when the model reasons only briefly.
-            assert reasoning.strip() or thread['provider'] == 'openai', 'No visible reasoning at effort '+effort
+            # OpenAI's `auto` summaries may be empty when the model reasons only briefly, through
+            # a router (`openai/…`) as well.
+            openai = thread['provider'] == 'openai' or str(thread.get('model', '')).startswith('openai/')
+            assert reasoning.strip() or openai, 'No visible reasoning at effort '+effort
             report.update(reasoning_chars=len(reasoning))
 
         def run_image(thread, effort, report):

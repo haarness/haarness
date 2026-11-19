@@ -2321,14 +2321,14 @@ fn describe_model_refusal(
     // only the next day; a per-minute one was already waited out.
     if let Some(quota) = free_tier_quota(&lower) {
         let billing = "turn on billing for this API key's project in Google AI Studio";
-        // Google's free tier is for its Flash models.
-        let flash: Vec<_> = info
+        // Google's free tier is for its Flash models and Gemini 4 Hydrogen.
+        let free: Vec<_> = info
             .models
             .iter()
-            .filter(|listed| listed.id.contains("flash"))
+            .filter(|listed| listed.id.contains("flash") || listed.id.contains("hydrogen"))
             .cloned()
             .collect();
-        let such_as = match listed_alternatives(&flash, model).as_slice() {
+        let such_as = match listed_alternatives(&free, model).as_slice() {
             [] => String::new(),
             names => format!(", such as {}", spoken_list(names, "or")),
         };
@@ -20631,6 +20631,15 @@ fn ask_plans(name: &str, arguments: &serde_json::Value, workspace: &Path) -> Vec
     // open, after links and `..`: a link `notes.txt -> .env` still asks, and
     // `node_modules/x/../../.env` is not a file inside node_modules.
     let mut patterns = vec![target.clone()];
+    // A glob walks each alternative of its braces, so each meets the rules
+    // too: a rule written for `secret/**` sees `{secret,docs}/**`.
+    if name == "glob" {
+        for alternative in crate::glob_braces::alternatives(&target).unwrap_or_default() {
+            if !patterns.contains(&alternative) {
+                patterns.push(alternative);
+            }
+        }
+    }
     // A fetch also meets the rules for the address it really reads, so case,
     // a user name, a trailing dot, the default port or `..` cannot step
     // around a rule written for the plain address.
@@ -27882,6 +27891,49 @@ mod tests {
         assert_eq!(grep.last().unwrap().patterns, vec!["unsafe"]);
     }
 
+    /// The glob tool walks each alternative of a pattern's braces, so a rule
+    /// written for one of them (`glob:secret/**`) meets it inside braces.
+    #[test]
+    fn a_glob_rule_meets_each_alternative_of_a_pattern() {
+        let engine = crate::PermissionEngine::new(vec![
+            crate::PermissionRule {
+                pattern: "*".into(),
+                decision: crate::PermissionDecision::Allow,
+            },
+            crate::PermissionRule {
+                pattern: "glob:secret/**".into(),
+                decision: crate::PermissionDecision::Deny,
+            },
+        ]);
+        let plan = |pattern: &str| {
+            super::ask_plans(
+                "glob",
+                &json!({"pattern": pattern}),
+                std::path::Path::new("/workspace"),
+            )
+            .pop()
+            .unwrap()
+        };
+        let denied = |plan: &super::AskPlan| {
+            plan.patterns.iter().any(|pattern| {
+                engine.evaluate(&plan.operation(pattern)) == crate::PermissionDecision::Deny
+            })
+        };
+        let braced = plan("{secret,docs}/**");
+        assert_eq!(
+            braced.patterns,
+            vec!["{secret,docs}/**", "secret/**", "docs/**"]
+        );
+        assert!(denied(&braced));
+        // Without braces, or with braces that stand for themselves, the
+        // pattern is all there is, as before.
+        for pattern in ["docs/**", "{x}/*.md", "{a,b}{c,d}{e,f}{g,h}{i,j}{k,l}"] {
+            let unbraced = plan(pattern);
+            assert_eq!(unbraced.patterns, vec![pattern], "{pattern}");
+            assert!(!denied(&unbraced), "{pattern}");
+        }
+    }
+
     #[test]
     fn file_permissions_also_meet_the_rules_for_the_file_really_opened() {
         let workspace =
@@ -29395,6 +29447,8 @@ mod tests {
         flash.display_name = "Gemini 3.8 Flash".into();
         let mut argon = model_info("gemini-4-argon", 1_048_576);
         argon.display_name = "Gemini 4 Argon".into();
+        let mut hydrogen = model_info("gemini-4-hydrogen", 1_048_576);
+        hydrogen.display_name = "Gemini 4 Hydrogen".into();
         let mut pro = model_info("gemini-2.5-pro", 1_048_576);
         pro.display_name = "Gemini 2.5 Pro".into();
         let catalog = haarness_protocol::ProviderInfo {
@@ -29402,6 +29456,7 @@ mod tests {
             name: "Google Gemini".into(),
             authenticated: true,
             models: vec![
+                hydrogen,
                 argon,
                 flash,
                 model_info("gemini-3.1-pro-preview", 1_048_576),
@@ -29432,7 +29487,7 @@ mod tests {
         assert_eq!(
             super::describe_model_refusal(&left_out, &catalog, "gemini-4-argon", true).as_deref(),
             Some(
-                "Google Gemini's free tier doesn't include Gemini 4 Argon. Choose another model for this chat, such as Gemini 3.8 Flash, or turn on billing for this API key's project in Google AI Studio."
+                "Google Gemini's free tier doesn't include Gemini 4 Argon. Choose another model for this chat, such as Gemini 4 Hydrogen or Gemini 3.8 Flash, or turn on billing for this API key's project in Google AI Studio."
             )
         );
         assert_eq!(

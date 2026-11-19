@@ -913,6 +913,60 @@ test("with the terminal open, opening another chat by pointer or keyboard leaves
   for (const pty of await client!.listPtys()) await client!.deletePty(pty.id);
 });
 
+test("a terminal cleared in one chat of This computer stays cleared after another chat is opened and then it again", async () => {
+  // All of This computer's chats share one server, which lists every chat's
+  // terminals; the panel shows only the open chat's.
+  const shell = join(temporary, "plain-shell");
+  await writeFile(shell, "#!/bin/bash\nexport PS1='plain$ '\nexec /bin/bash --noprofile --norc -i\n", { mode: 0o755 });
+  Object.assign(env, { SHELL: shell, BASH_SILENCE_DEPRECATION_WARNING: "1" });
+  await launch();
+  await send("First chat about clearing");
+  await ready();
+  client = homeClient();
+  await expect(rows()).toHaveCount(1);
+  await section().getByRole("button", { name: "New chat in This computer", exact: true }).click();
+  await send("Second chat about clearing");
+  await expect(rows()).toHaveCount(2);
+  const terminal = page.locator(".xterm-helper-textarea");
+  const shown = page.locator(".terminal-view .xterm-rows");
+  const written = () =>
+    shown.locator(":scope > div").evaluateAll((items) => items.map((item) => (item.textContent ?? "").trimEnd()).filter(Boolean));
+  await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
+  await expect(terminal).toBeFocused();
+  await expect(shown).toContainText("plain$");
+  await terminal.fill("seq -f 'line %03g' 1 200");
+  await terminal.press("Enter");
+  await expect(shown).toContainText("line 200");
+  await expect.poll(async () => (await written()).at(-1)).toBe("plain$");
+  // Clear, from the terminal's menu (main records it in tests instead of
+  // showing it).
+  await app!.evaluate(() => void ((globalThis as { haarnessContextMenus?: Electron.Menu[] }).haarnessContextMenus = []));
+  const box = (await page.locator(".terminal-view .xterm-screen").boundingBox())!;
+  await page.mouse.click(box.x + box.width - 20, box.y + box.height - 20, { button: "right" });
+  await expect
+    .poll(() =>
+      app!.evaluate(() => {
+        const menu = (globalThis as { haarnessContextMenus?: Electron.Menu[] }).haarnessContextMenus?.at(-1);
+        const clear = menu?.items.find((item) => item.label === "Clear");
+        clear?.click();
+        return !!clear;
+      }),
+    )
+    .toBe(true);
+  await expect.poll(written).toEqual(["plain$"]);
+  // The first chat, whose own shell starts, and back.
+  await rows().filter({ hasText: "First chat" }).click();
+  await expect.poll(async () => (await client!.listPtys()).length, { timeout: 60000 }).toBe(2);
+  await expect(shown).toContainText("plain$");
+  await expect(shown).not.toContainText("line 200");
+  await rows().filter({ hasText: "Second chat" }).click();
+  await expect.poll(written).toEqual(["plain$"]);
+  // The replay has had time to arrive: the cleared lines stay gone.
+  await page.waitForTimeout(1500);
+  expect(await written()).toEqual(["plain$"]);
+  for (const pty of await client!.listPtys()) await client!.deletePty(pty.id);
+});
+
 test("inline code in a chat of This computer links the files of the chat's own folder, and nothing outside it, as its turns end", async () => {
   await launch();
   await expect(composer()).toBeEnabled();

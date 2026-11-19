@@ -3,12 +3,13 @@ import { app } from "electron";
 import { spawn, type ChildProcess } from "node:child_process";
 import { access, realpath } from "node:fs/promises";
 import { constants } from "node:fs";
-import { join, resolve, delimiter } from "node:path";
+import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Haarness, type ServerAuth } from "@haarness/sdk";
 import type { Connection, DesktopEvent } from "../shared";
 import { localArgs } from "./validation";
 import { isChatHome } from "./chat-home";
+import { toolEnvironment } from "./tool-path";
 export interface ProjectConnection {
   view: Connection;
   client: Haarness;
@@ -76,17 +77,16 @@ export async function executable() {
     "Haarness executable is missing. Run npm run desktop:dev from the repository, or reinstall the desktop app.",
   );
 }
+// Worked out once per run: the folders are looked at on the main thread.
+let tools: ReturnType<typeof toolEnvironment> | undefined;
 export function environment() {
-  const paths = [
-    ...(app.isPackaged ? [join(process.resourcesPath, "bin")] : []),
-    process.env.PATH ?? "",
-    join(app.getPath("home"), ".bun/bin"),
-    "/opt/homebrew/bin",
-    "/usr/local/bin",
-    "/usr/bin",
-    "/bin",
-  ];
-  return { ...process.env, PATH: paths.join(delimiter) };
+  tools ??= toolEnvironment({
+    platform: process.platform,
+    env: process.env,
+    accountHome: app.getPath("home"),
+    bundled: app.isPackaged ? [join(process.resourcesPath, "bin")] : [],
+  });
+  return { ...process.env, ...tools };
 }
 export async function invoke(
   workspace: string,

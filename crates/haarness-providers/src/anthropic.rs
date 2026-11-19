@@ -48,6 +48,26 @@ pub(crate) fn messages_endpoint(base: &str) -> String {
     }
 }
 
+/// A Messages request below a base URL (see [`crate::sse::Route`]): a
+/// redirect's suggested base URL names the version, as the Messages address
+/// is built from it.
+const MESSAGES_ROUTE: crate::sse::Route<'static> = crate::sse::Route {
+    tail: "/messages",
+    endpoint: |base, _| messages_endpoint(base),
+};
+
+/// The model list beside the Messages endpoint.
+const MODELS_ROUTE: crate::sse::Route<'static> = crate::sse::Route {
+    tail: "/models",
+    endpoint: |base, tail| {
+        let messages = messages_endpoint(base);
+        format!(
+            "{}{tail}",
+            messages.strip_suffix("/messages").unwrap_or(&messages)
+        )
+    },
+};
+
 impl AnthropicProvider {
     #[must_use]
     pub fn from_environment() -> Self {
@@ -168,6 +188,9 @@ impl AnthropicProvider {
                 .send()
                 .await
                 .ok()
+                .filter(|response| {
+                    !crate::sse::unfollowed_listing(&self.id, response, Some(MODELS_ROUTE))
+                })
                 .and_then(|response| response.error_for_status().ok())?;
             let Ok(body) = response.json::<Value>().await else {
                 return None;
@@ -571,7 +594,7 @@ impl ModelProvider for AnthropicProvider {
             limits,
         )
         .await?;
-        let trace = crate::RequestTrace::of(&response);
+        let trace = crate::RequestTrace::of(&response).below_base(Some(MESSAGES_ROUTE));
         let provider_id = self.id.clone();
         let mut events = json_stream(response, &trace, cancel, limits);
         // A thinking block's text waits for its signature, which says
@@ -1000,6 +1023,7 @@ pub(crate) fn preferred_models() -> Vec<ModelInfo> {
         model("claude-opus-5-5"),
         model("claude-sonnet-5-5"),
         model("claude-haiku-5-5"),
+        model("claude-fable-5-2"),
         model("claude-fable-5-1"),
         model("claude-fable-5"),
         model("claude-opus-5"),
@@ -1034,6 +1058,61 @@ pub(crate) mod tests {
     use haarness_core::{
         CoreError, KeyCheck, ModelProvider, ProviderEvent, ProviderMessage, ProviderRequest,
     };
+
+    /// A redirect's suggested base URL is one the Messages address, or the
+    /// model list beside it, is built back from: a base that names no
+    /// version gets `/v1` added, so an address without one gets none.
+    #[test]
+    fn a_redirect_suggests_a_base_url_its_address_is_built_back_from() {
+        let suggested = |answered: &str, location: &str, route| {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(reqwest::header::LOCATION, location.parse().unwrap());
+            crate::sse::Unfollowed::of(
+                reqwest::StatusCode::TEMPORARY_REDIRECT,
+                &headers,
+                &reqwest::Url::parse(answered).unwrap(),
+                Some(route),
+            )
+            .unwrap()
+            .base_url
+        };
+        let messages = "http://gw.example/custom/v1/messages";
+        assert_eq!(
+            suggested(
+                messages,
+                "https://new.example/anthropic/v1/messages",
+                super::MESSAGES_ROUTE
+            )
+            .as_deref(),
+            Some("https://new.example/anthropic/v1")
+        );
+        assert_eq!(
+            suggested(
+                messages,
+                "https://new.example/custom/messages",
+                super::MESSAGES_ROUTE
+            ),
+            None
+        );
+        let models = "http://gw.example/custom/v1/models";
+        assert_eq!(
+            suggested(
+                models,
+                "https://new.example/x/v1/models",
+                super::MODELS_ROUTE
+            )
+            .as_deref(),
+            Some("https://new.example/x/v1")
+        );
+        assert_eq!(
+            suggested(
+                models,
+                "https://new.example/custom/models",
+                super::MODELS_ROUTE
+            ),
+            None
+        );
+    }
 
     #[test]
     fn base_url_follows_the_sdk_convention() {
@@ -1796,6 +1875,8 @@ pub(crate) mod tests {
             "claude-opus-4-8",
             "claude-opus-6",
             "claude-nova-7",
+            "claude-fable-5-2",
+            "claude-mythos-5-2",
             // Vertex AI's dated ids and a context mark name the same release.
             "claude-opus-5@20260301",
             "claude-sonnet-5@20260301",
@@ -1816,6 +1897,10 @@ pub(crate) mod tests {
             assert!(!adaptive_thinking(id), "{id}");
         }
         for id in [
+            "claude-fable-5-2",
+            "claude-mythos-5-2",
+            "global.anthropic.claude-fable-5-2",
+            "claude-fable-5-2@20261101",
             "claude-fable-5-1",
             "claude-mythos-5-1",
             "claude-opus-5-5",

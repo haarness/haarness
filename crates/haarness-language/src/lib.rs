@@ -789,6 +789,7 @@ impl LanguageService {
         for name in haarness_core::private_env_names() {
             command.env_remove(name);
         }
+        use_lookup_path(&mut command, &formatter.environment);
         command
             .current_dir(dunce::simplified(root))
             .envs(&formatter.environment)
@@ -1013,6 +1014,7 @@ impl Client {
         for name in haarness_core::private_env_names() {
             command.env_remove(name);
         }
+        use_lookup_path(&mut command, &config.environment);
         command
             .args(config.command.iter().skip(1))
             .current_dir(dunce::simplified(&workspace))
@@ -1404,6 +1406,41 @@ fn file_uri(path: &Path) -> Result<String, String> {
         .map_err(|()| format!("cannot convert {} to a file URI", path.display()))
 }
 
+/// Where a language server or formatter without a folder in its name is
+/// looked for: the `PATH` its configuration sets, or the server's own with
+/// the tool folders Desktop named after it (`HAARNESS_TOOL_PATH`), so
+/// rust-analyzer in `~/.cargo/bin` is found when Desktop was opened from the
+/// Dock.
+fn lookup_path(environment: &BTreeMap<String, String>) -> Option<std::ffi::OsString> {
+    lookup_path_from(
+        environment,
+        std::env::var_os("PATH").as_deref(),
+        &haarness_ripgrep::tool_folders(),
+    )
+}
+
+fn lookup_path_from(
+    environment: &BTreeMap<String, String>,
+    server: Option<&std::ffi::OsStr>,
+    tools: &[PathBuf],
+) -> Option<std::ffi::OsString> {
+    match environment.get("PATH") {
+        Some(path) => Some(path.into()),
+        None => haarness_ripgrep::with_folders(server, tools),
+    }
+}
+
+/// Gives `command` the PATH it is looked for on, when the tool folders add
+/// to the server's own.
+fn use_lookup_path(command: &mut Command, environment: &BTreeMap<String, String>) {
+    if environment.contains_key("PATH") || haarness_ripgrep::tool_folders().is_empty() {
+        return;
+    }
+    if let Some(path) = lookup_path(environment) {
+        command.env("PATH", path);
+    }
+}
+
 fn executable_available(
     command: &[String],
     environment: &BTreeMap<String, String>,
@@ -1421,10 +1458,7 @@ fn executable_available(
             workspace.join(path).is_file()
         };
     }
-    let search_path = environment
-        .get("PATH")
-        .map(std::ffi::OsString::from)
-        .or_else(|| std::env::var_os("PATH"));
+    let search_path = lookup_path(environment);
     // Windows finds `rust-analyzer` as `rust-analyzer.exe`: a name without
     // an extension is also looked for with each one PATHEXT lists.
     let mut names = vec![program.clone()];
@@ -1590,6 +1624,32 @@ fn builtin_formatters() -> BTreeMap<String, FormatterDefinition> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A language server or formatter is looked for on the server's PATH
+    /// and then in the tool folders Desktop named, unless its configuration
+    /// sets a PATH of its own.
+    #[cfg(unix)]
+    #[test]
+    fn tool_folders_follow_the_server_s_path_unless_the_configuration_sets_one() {
+        let tools = [
+            PathBuf::from("/home/me/.cargo/bin"),
+            PathBuf::from("/usr/bin"),
+        ];
+        let none = BTreeMap::new();
+        assert_eq!(
+            lookup_path_from(&none, Some("/usr/bin:/bin".as_ref()), &tools),
+            Some("/usr/bin:/bin:/home/me/.cargo/bin".into())
+        );
+        assert_eq!(
+            lookup_path_from(&none, Some("/usr/bin:/bin".as_ref()), &[]),
+            Some("/usr/bin:/bin".into())
+        );
+        let own = BTreeMap::from([("PATH".to_owned(), "/opt/lsp".to_owned())]);
+        assert_eq!(
+            lookup_path_from(&own, Some("/usr/bin".as_ref()), &tools),
+            Some("/opt/lsp".into())
+        );
+    }
 
     #[test]
     fn extension_matching_accepts_dotted_and_bare_configuration() {

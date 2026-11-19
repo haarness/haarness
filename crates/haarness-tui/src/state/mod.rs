@@ -47,7 +47,7 @@ pub enum PermissionChoice {
 
 /// The app a computer use request may allow in every chat (see [`PermissionChoice::App`]): an action in an app.
 /// Opening an app, looking at the whole screen, anything in an app set to ask every time, and a terminal or editor as
-/// servers before terms version 2 mark one (`console`) offer nothing lasting.
+/// servers before 0.1.20 mark one (`console`) offer nothing lasting.
 #[must_use]
 pub fn lasting_app(pending: &haarness_protocol::PendingPermissionInfo) -> Option<&str> {
     let mac = &pending.detail["__mac"];
@@ -2973,26 +2973,43 @@ impl App {
     }
 
     /// A bracketed paste or terminal file drop into the prompt: dropped
-    /// media becomes attachments, anything else is text. `uploads` says the
-    /// client sends files to the server whole (an attached server).
+    /// media becomes attachments, anything else is text. `uploads` says
+    /// whether the client sends files to the server whole (an attached
+    /// server), and how: to another computer through Cloud's relay, fewer.
     pub fn paste_into_prompt(&mut self, text: &str, uploads: crate::media::Uploads) {
         // A shell command reads only the prompt's text, so in shell mode a
         // dropped file stays its path.
-        let paths = if self.shell_mode {
+        let dropped = if self.shell_mode {
             Ok(None)
         } else {
             crate::media::paths_from_paste(text, &self.attachments, self.language, uploads)
         };
-        match paths {
-            Ok(Some(paths)) => {
-                let added = self.add_attachments(paths);
-                self.notice = format!(
-                    "Attached {added} file{} · backspace removes",
-                    if added == 1 { "" } else { "s" }
-                );
+        match dropped {
+            Ok(Some(dropped)) => {
+                let added = self.add_attachments(dropped.media);
+                // Other files dropped with the media stay their paths, typed
+                // in where the caret is, never folded into a paste chip.
+                self.composer.insert_str(&dropped.text);
+                // Media the prompt holds already get no second chip.
+                self.notice = if added == 0 {
+                    self.language.text("Already attached").to_owned()
+                } else {
+                    self.language.count(
+                        added as u64,
+                        "Attached 1 file · backspace removes",
+                        "Attached {count} files · backspace removes",
+                    )
+                };
             }
             Ok(None) => self.composer.paste(text),
-            Err(error) => self.notice = error,
+            Err(refusal) => {
+                // Media over a limit are reported; a drop that named other
+                // files goes in as text all the same, so none of it is lost.
+                if refusal.keep_text {
+                    self.composer.paste(text);
+                }
+                self.notice = refusal.reason;
+            }
         }
         self.selection = 0;
     }

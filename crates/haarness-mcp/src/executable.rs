@@ -31,16 +31,42 @@ pub(super) fn resolve(program: &str, config: &McpConfigureRequest) -> Option<(Pa
             .or_else(|| std::env::var_os(name))
     };
     let extra = setting("HAARNESS_MCP_PATH");
-    let nvm = setting("NVM_DIR");
+    let nvm = home.as_deref().map(|home| {
+        nvm_root(
+            Path::new(home),
+            setting("NVM_DIR").as_deref(),
+            setting("XDG_CONFIG_HOME").as_deref(),
+        )
+    });
     fallback_path(
         program,
         &cwd,
         &inherited,
         home.as_deref(),
         extra.as_deref(),
-        nvm.as_deref(),
+        nvm.as_deref().map(Path::as_os_str),
         &system_directories(),
+        &haarness_ripgrep::tool_folders(),
     )
+}
+
+/// Where nvm keeps its versions: `NVM_DIR` when it is absolute, else the
+/// first of `$XDG_CONFIG_HOME/nvm`, `~/.nvm` and `~/.config/nvm` that is a
+/// folder (nvm's installer picks the first when `XDG_CONFIG_HOME` is set,
+/// which an app opened from the Dock may not have).
+fn nvm_root(home: &Path, nvm_dir: Option<&OsStr>, config: Option<&OsStr>) -> PathBuf {
+    if let Some(nvm) = nvm_dir.map(Path::new).filter(|path| path.is_absolute()) {
+        return nvm.to_path_buf();
+    }
+    let config = config
+        .map(Path::new)
+        .filter(|path| path.is_absolute())
+        .map(|config| config.join("nvm"));
+    config
+        .into_iter()
+        .chain([home.join(".nvm"), home.join(".config/nvm")])
+        .find(|path| path.is_dir())
+        .unwrap_or_else(|| home.join(".nvm"))
 }
 
 /// The system's own folders of installed programs.
@@ -53,6 +79,9 @@ fn system_directories() -> Vec<PathBuf> {
     directories
 }
 
+/// `tools` are the tool folders Desktop named (`HAARNESS_TOOL_PATH`), which
+/// come after every folder above.
+#[allow(clippy::too_many_arguments)]
 fn fallback_path(
     program: &str,
     cwd: &Path,
@@ -61,6 +90,7 @@ fn fallback_path(
     extra: Option<&OsStr>,
     nvm: Option<&OsStr>,
     system: &[PathBuf],
+    tools: &[PathBuf],
 ) -> Option<(PathBuf, OsString)> {
     let original = std::env::split_paths(inherited)
         .map(|path| cwd.join(path))
@@ -95,6 +125,7 @@ fn fallback_path(
             .unwrap_or_else(|| home.join(".nvm"));
         directories.extend(node_managers(home, &nvm));
     }
+    directories.extend(tools.iter().cloned());
     // Only folders that are there reach the launcher's PATH.
     directories.retain(|path| path.is_dir());
     let executable = locate(program, &directories)?;
@@ -265,6 +296,7 @@ mod tests {
             None,
             None,
             &[],
+            &[],
         )
         .unwrap();
         assert_eq!(path, directory.join(name));
@@ -284,6 +316,7 @@ mod tests {
                 Some(root.as_os_str()),
                 None,
                 None,
+                &[],
                 &[]
             )
             .is_none()
@@ -296,6 +329,7 @@ mod tests {
                 None,
                 Some(OsStr::new("relative/fallback")),
                 None,
+                &[],
                 &[]
             )
             .is_none()
@@ -356,6 +390,7 @@ mod tests {
                 None,
                 nvm.map(Path::as_os_str),
                 system,
+                &[],
             )
         }
     }
@@ -407,6 +442,74 @@ mod tests {
                 "{folder}: {env:?}"
             );
         }
+    }
+
+    /// Desktop's tool folders come after the version managers' own: nvm's
+    /// default npx still wins over a nodenv shim Desktop named, and a
+    /// launcher only Desktop's folders hold is found.
+    #[test]
+    fn desktop_s_tool_folders_come_after_the_version_managers() {
+        let home = Home::new();
+        let nodenv = home.launcher(".nodenv/shims", "haarness-fixture-npx");
+        let nvm = home.launcher(".nvm/versions/node/v20.18.1/bin", "haarness-fixture-npx");
+        let go = home.launcher("go/bin", "haarness-fixture-server");
+        let tools = [
+            nodenv.parent().unwrap().to_path_buf(),
+            go.parent().unwrap().to_path_buf(),
+        ];
+        let find = |program: &str| {
+            fallback_path(
+                program,
+                &home.0,
+                OsStr::new("/usr/bin:/bin"),
+                Some(home.0.as_os_str()),
+                None,
+                None,
+                &[],
+                &tools,
+            )
+        };
+        let (path, env) = find("haarness-fixture-npx").unwrap();
+        assert_eq!(path, nvm);
+        let env = std::env::split_paths(&env).collect::<Vec<_>>();
+        assert_eq!(&env[env.len() - 2..], &tools);
+        assert_eq!(find("haarness-fixture-server").unwrap().0, go);
+        assert!(home.find("haarness-fixture-server", None).is_none());
+    }
+
+    #[test]
+    fn nvm_lives_in_nvm_dir_or_the_first_of_its_usual_folders_that_is_there() {
+        let home = Home::new();
+        let config = home.0.join("config");
+        // Nothing there: nvm's own default.
+        assert_eq!(nvm_root(&home.0, None, None), home.0.join(".nvm"));
+        std::fs::create_dir_all(home.0.join(".config/nvm")).unwrap();
+        assert_eq!(nvm_root(&home.0, None, None), home.0.join(".config/nvm"));
+        std::fs::create_dir_all(home.0.join(".nvm")).unwrap();
+        assert_eq!(nvm_root(&home.0, None, None), home.0.join(".nvm"));
+        std::fs::create_dir_all(config.join("nvm")).unwrap();
+        assert_eq!(
+            nvm_root(&home.0, None, Some(config.as_os_str())),
+            config.join("nvm")
+        );
+        // A relative XDG_CONFIG_HOME or NVM_DIR is not used.
+        assert_eq!(
+            nvm_root(&home.0, Some(OsStr::new("nvm")), Some(OsStr::new("config"))),
+            home.0.join(".nvm")
+        );
+        assert_eq!(
+            nvm_root(&home.0, Some(OsStr::new("/elsewhere/nvm")), None),
+            PathBuf::from("/elsewhere/nvm")
+        );
+        // A launcher of the nvm under the config folder is found.
+        let home = Home::new();
+        home.launcher(
+            ".config/nvm/versions/node/v20.18.1/bin",
+            "haarness-fixture-npx",
+        );
+        let root = nvm_root(&home.0, None, None);
+        let (path, _) = home.find("haarness-fixture-npx", Some(&root)).unwrap();
+        assert!(path.starts_with(home.0.join(".config/nvm/versions/node/v20.18.1/bin")));
     }
 
     #[test]

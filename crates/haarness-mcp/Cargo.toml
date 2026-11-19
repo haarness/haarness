@@ -13,6 +13,7 @@ futures.workspace = true
 fs2.workspace = true
 haarness-core = { path = "../haarness-core" }
 haarness-protocol = { path = "../haarness-protocol" }
+haarness-ripgrep = { path = "../haarness-ripgrep" }
 http.workspace = true
 parking_lot.workspace = true
 process-wrap = { version = "9.1", features = ["tokio1"] }

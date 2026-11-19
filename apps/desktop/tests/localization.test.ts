@@ -328,7 +328,6 @@ test("keys translated through a variable are in the catalog", () => {
     "Screen Recording", "Required for screenshots. Agents can still read apps without it, just not see them.",
     "Apps without a rule", "Ask first means one approval per app in each chat, given by Auto's reviewer in Auto when it is on.",
     "Mark each click on screen", "A ring marks the spot for a moment before each click.",
-    "Terms for computer use", "You agree to these before agents use this Mac.",
     // Settings navigation and search titles.
     ...Object.values(settingsTitles),
     ...settingsSections.map(([section]) => section),
@@ -337,25 +336,6 @@ test("keys translated through a variable are in the catalog", () => {
   ];
   assert.deepEqual(
     dynamic.filter((key) => !Object.hasOwn(dictionaries.en, key)),
-    [],
-  );
-});
-
-// The computer use terms come from the server in English, and Desktop shows
-// each sentence through t(): every one of them, and each heading, needs a
-// translation. They are read from the Rust source, so a reworded term fails
-// here until its translations follow.
-test("every sentence of the computer use terms is in the catalog", async () => {
-  const source = await readFile(new URL("../../../crates/haarness-computer/src/terms.rs", import.meta.url), "utf8");
-  const literals = (text: string) => [...text.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map(([, value]) => value.replace(/\\(.)/g, "$1"));
-  const sentences = [
-    ...[...source.matchAll(/pub const (?:TITLE|INTRO): &str = ([\s\S]*?);/g)].flatMap(([, body]) => literals(body)),
-    ...[...source.matchAll(/pub const (?:FOR|NOT_FOR|UNDERSTAND): &\[&str\] = &\[([\s\S]*?)\];/g)].flatMap(([, body]) => literals(body)),
-    ...[...source.matchAll(/"heading": "([^"]+)"/g)].map(([, heading]) => heading),
-  ];
-  assert.ok(sentences.length >= 17, String(sentences.length));
-  assert.deepEqual(
-    sentences.filter((key) => !Object.hasOwn(dictionaries.en, key)),
     [],
   );
 });
