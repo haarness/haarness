@@ -1,6 +1,6 @@
 import { test as base, expect, _electron, type ElectronApplication, type Page } from "@playwright/test";
 import { attachFiles } from "./fixtures/composer";
-import { mkdtemp, mkdir, realpath, writeFile, readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, symlink, writeFile, readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
@@ -498,4 +498,34 @@ test("audit: restoring a profile previews the files it replaces and replaces the
   await expect(page.locator(".toast")).toContainText("Profile “\u2068work\u2069” restored.");
   await expect(settings.getByRole("alert")).toHaveCount(0);
   expect(await readFile(config, "utf8")).toBe(saved);
+});
+
+test("audit: saving a profile with linked skills keeps those inside and names one that leads outside", async ({ desktop: { page, a, temp } }) => {
+  // A project skill shared by two agents' folders, and a global skill linked
+  // in from a dotfiles folder: one link used to stop the whole save.
+  await mkdir(join(a, ".haarness/skills/fmt"), { recursive: true });
+  await writeFile(join(a, ".haarness/skills/fmt/SKILL.md"), "---\nname: fmt\ndescription: Format fixture skill\n---\nFormat the code.\n");
+  await mkdir(join(a, ".agents/skills"), { recursive: true });
+  await symlink("../../.haarness/skills/fmt", join(a, ".agents/skills/fmt"));
+  await mkdir(join(temp, "dotfiles/skills/lint"), { recursive: true });
+  await writeFile(join(temp, "dotfiles/skills/lint/SKILL.md"), "---\nname: lint\ndescription: Dotfiles fixture skill\n---\nLint the code.\n");
+  // The fixture's data folder holds the configuration folder too.
+  const linked = join(temp, "data/config/skills/lint");
+  await mkdir(join(temp, "data/config/skills"), { recursive: true });
+  await symlink(join(temp, "dotfiles/skills/lint"), linked);
+  await button(page, "Settings").click();
+  const settings = page.getByRole("dialog", { name: "Settings", exact: true });
+  await settings.getByRole("button", { name: "Profiles", exact: true }).click();
+  await settings.getByRole("button", { name: "Save profile", exact: true }).click();
+  const save = page.getByRole("dialog", { name: "Save profile", exact: true });
+  await save.getByRole("textbox", { name: "Name", exact: true }).fill("linked");
+  await save.getByRole("button", { name: "Save", exact: true }).click();
+  await expect.poll(() => readFile(join(a, "linked.profile.zip")).then(() => true, () => false)).toBe(true);
+  const output = page.locator(".command-output pre");
+  await expect(output).toContainText('"path":"project/.agents/skills/fmt/SKILL.md"');
+  await expect(output).toContainText('"path":"project/.haarness/skills/fmt/SKILL.md"');
+  await expect(output).not.toContainText("skills/lint/SKILL.md");
+  await expect(output).toContainText(`"leftOut":[${JSON.stringify(linked)}]`);
+  await expect(settings.getByRole("alert")).toHaveCount(0);
+  await settings.screenshot({ path: test.info().outputPath("save-linked-profile.png") });
 });

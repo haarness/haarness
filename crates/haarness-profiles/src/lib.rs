@@ -103,6 +103,24 @@ pub struct Archive {
     files: BTreeMap<String, Vec<u8>>,
 }
 
+/// A saved profile archive, and the symbolic links it was saved without
+/// because they lead to files a profile does not save.
+pub struct Saved {
+    pub bytes: Vec<u8>,
+    pub left_out: Vec<PathBuf>,
+}
+
+/// The files a restore writes (or, in a dry run, would write), and those it
+/// leaves alone because they are already in place: a link on the way to
+/// them stays inside the same folder and the file it leads to already holds
+/// the profile's bytes, as when a profile is restored into the project it
+/// was saved from.
+#[derive(Debug)]
+pub struct Restored {
+    pub targets: Vec<PathBuf>,
+    pub in_place: Vec<PathBuf>,
+}
+
 #[derive(Deserialize)]
 struct Installed {
     path: PathBuf,
@@ -337,25 +355,44 @@ impl Archive {
         Ok(Self { manifest, files })
     }
 
-    pub fn capture(roots: &Roots, name: &str, scope: Scope) -> Result<Vec<u8>> {
+    pub fn capture(roots: &Roots, name: &str, scope: Scope) -> Result<Saved> {
+        Self::capture_from(roots, name, scope, std::env::home_dir().as_deref())
+    }
+
+    /// [`Archive::capture`] for a person whose home folder is `home`.
+    fn capture_from(roots: &Roots, name: &str, scope: Scope, home: Option<&Path>) -> Result<Saved> {
         validate_name(name)?;
         let mut files = BTreeMap::new();
+        let mut walk = Walk::default();
         if scope != Scope::Local {
-            collect(&roots.config, "global/config", scope, &mut files)?;
+            let config = Place::new(&roots.config, "global/config", Reach::Saved);
+            collect(
+                &roots.config,
+                "global/config",
+                &config,
+                scope,
+                &mut files,
+                &mut walk,
+            )?;
             // The walk above never enters `plugins/`, whose only portable part
             // is `plugins/local/` (global plugins and marketplace MCP bundles).
             collect(
                 &roots.config.join("plugins/local"),
                 "global/config/plugins/local",
+                &config,
                 scope,
                 &mut files,
+                &mut walk,
             )?;
+            let data = Place::new(&roots.data, "global/data", Reach::Saved);
             for name in ["skills", "plugins/local"] {
                 collect(
                     &roots.data.join(name),
                     &format!("global/data/{name}"),
+                    &data,
                     scope,
                     &mut files,
+                    &mut walk,
                 )?;
             }
             // Bundle installed content instead of copying machine-specific registry paths.
@@ -370,7 +407,10 @@ impl Archive {
                         "global/config/plugins/local/profile-{}",
                         &hash(name.as_bytes())[..16]
                     );
-                    collect(&plugin.path, &prefix, scope, &mut files)?;
+                    // The registry names the plugin's folder, wherever it
+                    // is, so that folder is the one its links stay inside.
+                    let place = Place::new(&plugin.path, &prefix, Reach::Whole);
+                    collect(&plugin.path, &prefix, &place, scope, &mut files, &mut walk)?;
                     if !plugin.enabled {
                         files.insert(format!("{prefix}/.haarness-disabled"), (Vec::new(), false));
                     }
@@ -378,12 +418,24 @@ impl Archive {
             }
         }
         if scope != Scope::Global {
+            let mut project =
+                Place::new(&roots.project, "project", Reach::Project { markdown: true });
+            // A project that is the home folder, or holds it, holds the
+            // person's own notes too: no Markdown file there comes in by a link.
+            if home
+                .and_then(|home| fs::canonicalize(home).ok())
+                .is_some_and(|home| home.starts_with(&project.real))
+            {
+                project.reach = Reach::Project { markdown: false };
+            }
             for name in CONFIG_FILES.iter().chain(PROJECT_DIRS.iter()) {
                 collect(
                     &roots.project.join(name),
                     &format!("project/{name}"),
+                    &project,
                     scope,
                     &mut files,
+                    &mut walk,
                 )?;
             }
         }
@@ -440,13 +492,17 @@ impl Archive {
         }
         let bytes = zip.finish()?.into_inner();
         Self::decode(&bytes)?;
-        Ok(bytes)
+        let mut left_out = walk.left_out;
+        left_out.sort();
+        left_out.dedup();
+        Ok(Saved { bytes, left_out })
     }
 
     /// Validate every target before making changes; stage all replacements and roll back failures.
-    pub fn restore(&self, roots: &Roots, force: bool, dry_run: bool) -> Result<Vec<PathBuf>> {
+    pub fn restore(&self, roots: &Roots, force: bool, dry_run: bool) -> Result<Restored> {
         let _lock = lock(&roots.data.join(".profile-restore.lock"))?;
-        let mut targets = Vec::new();
+        let mut planned = Vec::new();
+        let mut in_place = Vec::new();
         let mut unique = BTreeSet::new();
         let mut existing = Vec::new();
         for entry in &self.manifest.entries {
@@ -456,6 +512,14 @@ impl Archive {
             );
             let target = target(roots, &entry.path)?;
             ensure!(unique.insert(target.clone()), "profile targets overlap");
+            // Nothing is ever written through a link; one that leads to a
+            // file inside the folder already holding these bytes is left alone.
+            if check_path(&target).is_err()
+                && let Some((real, current)) = self.in_place(roots, entry, &target)
+            {
+                in_place.push((target, real, current));
+                continue;
+            }
             check_path(&target)?;
             if let Ok(metadata) = fs::symlink_metadata(&target) {
                 ensure!(
@@ -474,12 +538,29 @@ impl Archive {
                     );
                 }
             }
-            targets.push(target);
+            planned.push((entry, target));
         }
+        // A file is not in place when another entry of this restore would
+        // write other bytes over it: the link on the way is refused instead.
+        for (target, real, current) in &in_place {
+            let overwritten = planned.iter().any(|(entry, planned)| {
+                fs::canonicalize(planned).is_ok_and(|planned| planned == *real)
+                    && self.written(entry, current) != *current
+            });
+            if overwritten {
+                check_path(target)?;
+                bail!("symlink path refused: {}", target.display());
+            }
+        }
+        let in_place: Vec<_> = in_place.into_iter().map(|(target, ..)| target).collect();
+        let targets = || planned.iter().map(|(_, target)| target.clone()).collect();
         // A dry run reports every file it would overwrite instead of
         // stopping at the first one.
         if dry_run {
-            return Ok(targets);
+            return Ok(Restored {
+                targets: targets(),
+                in_place,
+            });
         }
         ensure!(
             force || existing.is_empty(),
@@ -488,7 +569,7 @@ impl Archive {
         );
         let mut staged = Vec::new();
         let preparation = (|| -> Result<()> {
-            for (entry, target) in self.manifest.entries.iter().zip(&targets) {
+            for (entry, target) in &planned {
                 let parent = target.parent().context("profile target has no parent")?;
                 private_dir(parent)?;
                 let file = parent.join(format!(".haarness-profile-{}.tmp", Uuid::now_v7()));
@@ -554,7 +635,50 @@ impl Archive {
             }
         }
         result?;
-        Ok(targets)
+        Ok(Restored {
+            targets: targets(),
+            in_place,
+        })
+    }
+
+    /// The real path and bytes of the file `target`, which a link leads
+    /// through, when it already holds what `entry` restores: the link leads
+    /// to a regular file inside the folder the entry restores into, and that
+    /// file has the bytes the restore would write.
+    fn in_place(&self, roots: &Roots, entry: &Entry, target: &Path) -> Option<(PathBuf, Vec<u8>)> {
+        let root = fs::canonicalize(root(roots, &entry.path)?).ok()?;
+        let real = fs::canonicalize(target).ok()?;
+        if !real.starts_with(&root) {
+            return None;
+        }
+        // Compare the file that was opened, which a folder swapped for a link
+        // since cannot change, and never wait on a pipe.
+        let file = open(&real).ok()?;
+        if !held(&file, &real).is_some_and(|held| held.starts_with(&root)) {
+            return None;
+        }
+        let metadata = file.metadata().ok()?;
+        if !metadata.is_file() || metadata.len() > MAX_EXPANDED as u64 {
+            return None;
+        }
+        #[cfg(unix)]
+        waiting(&file).ok()?;
+        let mut current = Vec::new();
+        (&file)
+            .take(MAX_EXPANDED as u64 + 1)
+            .read_to_end(&mut current)
+            .ok()?;
+        (self.written(entry, &current) == current).then_some((real, current))
+    }
+
+    /// The bytes restoring `entry` writes over a file that holds `current`.
+    fn written(&self, entry: &Entry, current: &[u8]) -> Vec<u8> {
+        let data = self.files.get(&entry.path).map_or(&[][..], Vec::as_slice);
+        if is_machine_settings(&entry.path) {
+            with_machine_settings(data, machine_settings_in(current))
+        } else {
+            data.to_vec()
+        }
     }
 }
 
@@ -569,9 +693,13 @@ fn is_machine_settings(path: &str) -> bool {
 
 /// The `telemetry` setting in an existing configuration file.
 fn machine_settings(path: &Path) -> Option<serde_json::Value> {
-    let text = fs::read_to_string(path).ok()?;
+    machine_settings_in(&fs::read(path).ok()?)
+}
+
+/// The `telemetry` setting in the text of a configuration file.
+fn machine_settings_in(bytes: &[u8]) -> Option<serde_json::Value> {
     jsonc_parser::parse_to_serde_value::<serde_json::Value>(
-        &text,
+        std::str::from_utf8(bytes).ok()?,
         &jsonc_parser::ParseOptions::default(),
     )
     .ok()?
@@ -633,30 +761,218 @@ fn validate_name(name: &str) -> Result<()> {
 }
 
 fn target(roots: &Roots, path: &str) -> Result<PathBuf> {
-    for (prefix, root) in [
+    let (root, relative) = split(roots, path).context("invalid profile target")?;
+    Ok(root.join(relative))
+}
+
+/// The folder an archive path restores into.
+fn root<'a>(roots: &'a Roots, path: &str) -> Option<&'a Path> {
+    split(roots, path).map(|(root, _)| root)
+}
+
+fn split<'a, 'b>(roots: &'a Roots, path: &'b str) -> Option<(&'a Path, &'b str)> {
+    [
         ("global/config/", &roots.config),
         ("global/data/", &roots.data),
         ("project/", &roots.project),
-    ] {
-        if let Some(relative) = path.strip_prefix(prefix) {
-            return Ok(root.join(relative));
-        }
-    }
-    bail!("invalid profile target")
+    ]
+    .into_iter()
+    .find_map(|(prefix, root)| {
+        path.strip_prefix(prefix)
+            .map(|relative| (root.as_path(), relative))
+    })
 }
 
 type Captured = BTreeMap<String, (Vec<u8>, bool)>;
 
-fn collect(root: &Path, prefix: &str, scope: Scope, files: &mut Captured) -> Result<()> {
+/// How many symbolic links one save follows at most, so links that fan out
+/// into one another cannot keep a save walking the same folders.
+const MAX_LINKS: usize = 1000;
+
+/// How far inside its folder a symbolic link may lead and still be saved.
+#[derive(Clone, Copy)]
+enum Reach {
+    /// Anywhere: an installed plugin's folder is saved whole.
+    Whole,
+    /// Only to what a profile saves from the folder: the configuration and
+    /// data folders also hold sign-ins, history and other state of this
+    /// computer.
+    Saved,
+    /// To what a profile saves from the project and, with `markdown`, to a
+    /// Markdown file in it (an `AGENTS.md` kept as `CLAUDE.md`) outside hidden
+    /// folders other than the project's own configuration folders, and
+    /// outside any `Library`. A project also holds files no profile carries,
+    /// such as untracked secrets.
+    Project { markdown: bool },
+}
+
+/// A folder a profile saves from. A symbolic link met while saving it is
+/// saved as what it leads to only when that is inside this folder and within
+/// its reach, and so is every file the save opens.
+struct Place<'a> {
+    /// The folder's real path, every link on the way to it resolved. Real
+    /// paths here all come from `fs::canonicalize`, so on Windows they share
+    /// one form (`\\?\` included) and compare as they should.
+    real: PathBuf,
+    /// The archive path its contents are saved under.
+    prefix: &'a str,
+    reach: Reach,
+}
+
+/// What a save does with a symbolic link.
+enum Link {
+    /// Save what it leads to, this real path, under the link's own name.
+    Follow(PathBuf),
+    /// Pass over it without a word: it leads nowhere, or back into a folder
+    /// the save is inside, whose files are saved where they are.
+    Skip,
+    /// Leave it out and say so: it leads to files a profile does not save.
+    LeftOut,
+}
+
+/// What one save keeps track of while it walks.
+#[derive(Default)]
+struct Walk {
+    left_out: Vec<PathBuf>,
+    followed: usize,
+    used: usize,
+    /// The real folders holding the folder links being followed, outermost
+    /// first: a link back to one of them, or above, would never end.
+    holding: Vec<PathBuf>,
+}
+
+impl<'a> Place<'a> {
+    fn new(folder: &Path, prefix: &'a str, reach: Reach) -> Self {
+        Self {
+            real: fs::canonicalize(folder).unwrap_or_else(|_| folder.to_path_buf()),
+            prefix,
+            reach,
+        }
+    }
+
+    /// Where `real`, a real path, is inside this folder, as an archive-style
+    /// relative path; none when it is outside.
+    fn inside(&self, real: &Path) -> Option<String> {
+        real.strip_prefix(&self.real)
+            .ok()?
+            .to_str()
+            .map(|relative| relative.replace('\\', "/"))
+    }
+
+    /// Whether `real`, at `relative` inside this folder, is within its reach.
+    fn reaches(&self, relative: &str, real: &Path, scope: Scope) -> bool {
+        if relative.is_empty() {
+            return true;
+        }
+        // `.env` files, keys, credential stores and dependencies stay out
+        // under any name.
+        if excluded(relative) {
+            return false;
+        }
+        let saved = format!("{}/{relative}", self.prefix);
+        let portable = allowed(&saved, scope) || allowed(&format!("{saved}/_"), scope);
+        match self.reach {
+            Reach::Whole => true,
+            Reach::Saved => portable,
+            Reach::Project { markdown } => {
+                portable
+                    || PROJECT_DIRS.contains(&relative)
+                    || (markdown
+                        && Path::new(relative)
+                            .extension()
+                            .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+                        && relative.split('/').all(|part| {
+                            part != "Library"
+                                && (!part.starts_with('.') || PROJECT_DIRS.contains(&part))
+                        })
+                        && real.is_file())
+            }
+        }
+    }
+
+    /// The verdict for `path`: a link, or a saved folder that is, or sits
+    /// under, one.
+    fn judge(&self, path: &Path, scope: Scope, holding: &[PathBuf]) -> Result<Link> {
+        let mut again = true;
+        let target = loop {
+            match fs::canonicalize(path) {
+                Ok(target) => break target,
+                // A link that leads nowhere has nothing to save.
+                Err(_) if path.is_symlink() && fs::metadata(path).is_err() => {
+                    return Ok(Link::Skip);
+                }
+                // A link replaced by a file while it was being resolved
+                // (macOS then says "Invalid argument") is judged as it is now.
+                Err(_) if again && !path.is_symlink() => again = false,
+                Err(error) => {
+                    return Err(error).with_context(|| {
+                        format!("profile source cannot be resolved: {}", path.display())
+                    });
+                }
+            }
+        };
+        let Some(relative) = self.inside(&target) else {
+            return Ok(Link::LeftOut);
+        };
+        let parent = path
+            .parent()
+            .and_then(|parent| fs::canonicalize(parent).ok());
+        if parent
+            .iter()
+            .chain(holding)
+            .any(|folder| folder.starts_with(&target))
+        {
+            return Ok(Link::Skip);
+        }
+        Ok(if self.reaches(&relative, &target, scope) {
+            Link::Follow(target)
+        } else {
+            Link::LeftOut
+        })
+    }
+}
+
+fn collect(
+    root: &Path,
+    prefix: &str,
+    place: &Place,
+    scope: Scope,
+    files: &mut Captured,
+    walk: &mut Walk,
+) -> Result<()> {
     match fs::symlink_metadata(root) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.into()),
         Ok(_) => {}
     }
-    check_path(root)?;
-    let mut used: usize = files.values().map(|(bytes, _)| bytes.len()).sum();
-    for entry in walkdir::WalkDir::new(root)
+    walk.used = files.values().map(|(bytes, _)| bytes.len()).sum();
+    // A saved folder that is itself a link, or sits under one, follows the
+    // same rule as a link inside it.
+    match place.judge(root, scope, &[])? {
+        Link::Follow(real) => save(&real, root, prefix, place, scope, files, walk),
+        Link::Skip => Ok(()),
+        Link::LeftOut => {
+            walk.left_out.push(root.to_path_buf());
+            Ok(())
+        }
+    }
+}
+
+/// Save what the real folder or file `real` holds under the archive path
+/// `prefix`; `shown` is where the person sees it. Links are never followed
+/// by the walk itself, so no linked folder is opened before it is judged.
+fn save(
+    real: &Path,
+    shown: &Path,
+    prefix: &str,
+    place: &Place,
+    scope: Scope,
+    files: &mut Captured,
+    walk: &mut Walk,
+) -> Result<()> {
+    for entry in walkdir::WalkDir::new(real)
         .follow_links(false)
+        .follow_root_links(false)
         .into_iter()
         .filter_entry(|entry| {
             if entry.depth() == 0 {
@@ -665,46 +981,80 @@ fn collect(root: &Path, prefix: &str, scope: Scope, files: &mut Captured) -> Res
             if entry.file_name().to_str().is_some_and(macos_clutter) {
                 return false;
             }
-            let relative = entry.path().strip_prefix(root).unwrap_or(Path::new(""));
+            let relative = entry.path().strip_prefix(real).unwrap_or(Path::new(""));
             let path = format!("{prefix}/{}", relative.to_string_lossy().replace('\\', "/"));
             allowed(&path, scope) || allowed(&format!("{path}/_"), scope)
         })
     {
         let entry = entry?;
-        let relative = entry.path().strip_prefix(root)?;
+        let relative = entry.path().strip_prefix(real)?;
         let suffix = relative
             .to_str()
             .context("profile filename must be UTF-8")?
             .replace('\\', "/");
-        let path = if suffix.is_empty() {
-            prefix.into()
+        let (path, named) = if suffix.is_empty() {
+            (prefix.to_owned(), shown.to_path_buf())
         } else {
-            format!("{prefix}/{suffix}")
+            (format!("{prefix}/{suffix}"), shown.join(relative))
         };
         if !allowed(&path, scope) && !allowed(&format!("{path}/_"), scope) {
             continue;
         }
-        ensure!(
-            !entry.file_type().is_symlink(),
-            "profile source symlink refused: {}",
-            entry.path().display()
-        );
+        if entry.file_type().is_symlink() {
+            match place.judge(entry.path(), scope, &walk.holding)? {
+                // A file where a profile saves only folders would not be a
+                // portable archive.
+                Link::Follow(target) if target.is_file() && !allowed(&path, scope) => {
+                    walk.left_out.push(named);
+                }
+                Link::Follow(target) => {
+                    walk.followed += 1;
+                    ensure!(
+                        walk.followed <= MAX_LINKS,
+                        "profile has more than {MAX_LINKS} symbolic links to follow"
+                    );
+                    walk.holding
+                        .push(entry.path().parent().unwrap_or(real).to_path_buf());
+                    let saved = save(&target, &named, &path, place, scope, files, walk);
+                    walk.holding.pop();
+                    saved?;
+                }
+                Link::Skip => {}
+                Link::LeftOut => walk.left_out.push(named),
+            }
+            continue;
+        }
         if entry.file_type().is_dir() {
             continue;
         }
         ensure!(entry.file_type().is_file(), "profile source is not regular");
-        let metadata = entry.metadata()?;
-        used -= files.get(&path).map_or(0, |(bytes, _)| bytes.len());
+        let file = open(entry.path())?;
+        // Judge the file that was opened rather than its path, so a link put
+        // in place since the path was walked cannot bring in another file.
+        let opened = held(&file, entry.path());
+        if !opened.is_some_and(|opened| {
+            place
+                .inside(&opened)
+                .is_some_and(|relative| place.reaches(&relative, &opened, scope))
+        }) {
+            walk.left_out.push(named);
+            continue;
+        }
+        let metadata = file.metadata()?;
+        ensure!(metadata.is_file(), "profile source is not regular");
+        #[cfg(unix)]
+        waiting(&file)?;
+        walk.used -= files.get(&path).map_or(0, |(bytes, _)| bytes.len());
         ensure!(
-            metadata.len() <= (MAX_EXPANDED - used) as u64,
+            metadata.len() <= (MAX_EXPANDED - walk.used) as u64,
             "profile exceeds archive limits"
         );
         let mut data = Vec::new();
-        File::open(entry.path())?
-            .take((MAX_EXPANDED - used) as u64 + 1)
+        (&file)
+            .take((MAX_EXPANDED - walk.used) as u64 + 1)
             .read_to_end(&mut data)?;
         ensure!(
-            used + data.len() <= MAX_EXPANDED,
+            walk.used + data.len() <= MAX_EXPANDED,
             "profile exceeds expanded limit"
         );
         #[cfg(unix)]
@@ -714,10 +1064,75 @@ fn collect(root: &Path, prefix: &str, scope: Scope, files: &mut Captured) -> Res
         };
         #[cfg(not(unix))]
         let executable = false;
-        used += data.len();
+        walk.used += data.len();
         files.insert(path, (data, executable));
     }
     Ok(())
+}
+
+/// Open `path` to read it, without waiting on a named pipe put in its place.
+fn open(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOCTTY);
+    }
+    options.open(path)
+}
+
+/// Let reads of the regular file `file` wait as usual again, once opening it
+/// could not wait on a pipe: a file kept in the cloud is fetched, not refused.
+#[cfg(unix)]
+fn waiting(file: &File) -> Result<()> {
+    use nix::fcntl::{FcntlArg, OFlag, fcntl};
+    let flags = OFlag::from_bits_truncate(fcntl(file, FcntlArg::F_GETFL)?);
+    fcntl(file, FcntlArg::F_SETFL(flags - OFlag::O_NONBLOCK))?;
+    Ok(())
+}
+
+/// The real path of the file `opened` holds, as the system names it, which
+/// a link put in place of `path` since it was opened does not change. Where
+/// the system cannot say (Windows, Linux without `/proc`), the real path of
+/// `path` while it still names that very file; otherwise none.
+fn held(opened: &File, path: &Path) -> Option<PathBuf> {
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        let mut real = PathBuf::new();
+        if nix::fcntl::fcntl(opened, nix::fcntl::FcntlArg::F_GETPATH(&mut real)).is_ok() {
+            return Some(real);
+        }
+    }
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        use std::os::fd::AsRawFd as _;
+        if let Ok(real) = fs::read_link(format!("/proc/self/fd/{}", opened.as_raw_fd())) {
+            return Some(real);
+        }
+    }
+    let real = fs::canonicalize(path).ok()?;
+    still_names(opened, &real).then_some(real)
+}
+
+#[cfg(unix)]
+fn still_names(opened: &File, real: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (opened.metadata(), fs::metadata(real)) {
+        (Ok(opened), Ok(named)) => (opened.dev(), opened.ino()) == (named.dev(), named.ino()),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn still_names(opened: &File, real: &Path) -> bool {
+    match (
+        opened.try_clone().and_then(same_file::Handle::from_file),
+        same_file::Handle::from_path(real),
+    ) {
+        (Ok(opened), Ok(named)) => opened == named,
+        _ => false,
+    }
 }
 
 fn private_dir(path: &Path) -> Result<()> {
