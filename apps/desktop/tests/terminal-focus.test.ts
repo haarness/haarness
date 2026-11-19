@@ -18,6 +18,37 @@ test("a terminal the person opens, picks or starts takes the keyboard once it co
   assert.equal(claim.take(), true);
 });
 
+test("a terminal the person starts takes the keyboard, not the one shown while it starts", () => {
+  const claim = keyboardClaim();
+  // The panel opened, and New terminal was clicked before its first
+  // terminal connected: the press ended the panel's claim.
+  claim.claim();
+  claim.release();
+  claim.starting();
+  // The first terminal connects while the new one starts, and is then
+  // replaced by it: it does not take the keyboard, and the claim stands.
+  assert.equal(claim.take("first"), false);
+  claim.started("new");
+  assert.equal(claim.take("first"), false);
+  assert.equal(claim.take("new"), true);
+  assert.equal(claim.take("new"), false);
+  // A press while it starts leaves the keyboard where it was pressed.
+  claim.starting();
+  claim.release();
+  claim.started("other");
+  assert.equal(claim.take("other"), false);
+  // A terminal that did not start leaves no claim behind.
+  claim.starting();
+  claim.started();
+  assert.equal(claim.take("any"), false);
+  // Listing the same place again keeps the claim for the new terminal.
+  claim.starting();
+  claim.started("again");
+  claim.shown(true);
+  assert.equal(claim.take("first"), false);
+  assert.equal(claim.take("again"), true);
+});
+
 test("a pointer press before the terminal connects leaves the keyboard where it was pressed", () => {
   const claim = keyboardClaim();
   claim.claim();

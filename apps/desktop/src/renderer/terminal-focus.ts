@@ -1,3 +1,6 @@
+/** A claim for a terminal the person is starting, which has no id yet. */
+const STARTING = Symbol("starting");
+
 /**
  * Whether the next terminal view to connect takes the keyboard.
  *
@@ -10,14 +13,28 @@
  * starting a terminal, Retry), and the claim lasts until a view connects and
  * takes it, the person presses the pointer anywhere (which puts the keyboard
  * where they pressed) or types or tabs outside the terminal (`typedElsewhere`),
- * or the panel shows another folder or project.
+ * or the panel shows another folder or project. A terminal the person starts
+ * claims it for itself alone: the view the panel opened with may connect
+ * while it starts, and is then replaced by the new one.
  */
 export function keyboardClaim() {
-  let claimed = false;
+  /** Which view takes the keyboard as it connects: any (`true`), none, the
+   * one of the terminal with that id, or the one of the terminal starting. */
+  let claimed: boolean | string | typeof STARTING = false;
   return {
     /** The person brought a terminal up: the next view to connect takes the keyboard. */
     claim() {
       claimed = true;
+    },
+    /** The person started a terminal: only its view takes the keyboard, once
+     * `started` names it. */
+    starting() {
+      claimed = STARTING;
+    },
+    /** The terminal being started is `terminal`, or did not start
+     * (`undefined`). A claim a press or keys ended meanwhile stays ended. */
+    started(terminal?: string) {
+      if (claimed === STARTING) claimed = terminal ?? false;
     },
     /** A pointer press, or keys used elsewhere: the keyboard stays where the person put it. */
     release() {
@@ -34,13 +51,15 @@ export function keyboardClaim() {
      */
     shown(kept: boolean, elsewhere = false) {
       if (elsewhere) claimed = false;
-      else if (kept) claimed = true;
+      else if (kept && claimed === false) claimed = true;
     },
-    /** Whether a view that just connected takes the keyboard; the claim ends either way. */
-    take() {
-      const taken = claimed;
+    /** Whether the view of `terminal` that just connected takes the
+     * keyboard. A claim for any view ends either way; one for another
+     * terminal stands. */
+    take(terminal?: string) {
+      if (claimed !== true && (terminal === undefined || claimed !== terminal)) return false;
       claimed = false;
-      return taken;
+      return true;
     },
   };
 }

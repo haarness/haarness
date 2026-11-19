@@ -431,6 +431,37 @@ async fn a_subagent_stopped_by_the_safety_check_tells_its_parent_not_to_retry_it
     );
     // That wording is for a person, who can send a follow-up.
     assert!(!output.contains("Send a follow-up message"), "{output}");
+    // The subagent's own chat tells the person who opens it what follows.
+    let child = items
+        .iter()
+        .find_map(|item| match &item.data {
+            ItemData::TaskLink {
+                child_thread_id, ..
+            } => Some(*child_thread_id),
+            _ => None,
+        })
+        .unwrap();
+    let stops = runtime
+        .items(child, None)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|item| match item.data {
+            ItemData::Error {
+                message,
+                turn_left_out,
+                ..
+            } => Some((message, turn_left_out)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        stops,
+        [(
+            "Stopped by the provider's safety check (refusal). The subagent won't see this request again; the agent that started it decides what to do next.".to_owned(),
+            true
+        )]
+    );
     std::fs::remove_dir_all(directory).unwrap();
 }
 

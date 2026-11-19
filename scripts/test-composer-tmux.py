@@ -245,9 +245,20 @@ with tempfile.TemporaryDirectory(prefix="haarness-composer-") as directory:
             run("tmux", "set-buffer", "-b", "composer", " ".join(str(path).replace(" ", "\\ ") for path in paths))
             run("tmux", "paste-buffer", "-p", "-b", "composer", "-t", session)
 
+        def prompt_box():
+            """Every row of the prompt box, up to the blank row over it: a
+            dropped path under a long TMPDIR wraps over more rows than
+            composer() reads, and the attachment row sits above them."""
+            box = []
+            for row in reversed(pane().split("─" * 20)[0].rstrip().splitlines()):
+                if not row.strip():
+                    break
+                box.insert(0, row)
+            return "\n".join(box)
+
         def draft():
             """The prompt's text with its wrapped rows put back together."""
-            return "".join(line.strip() for line in composer().splitlines())
+            return "".join(line.strip() for line in prompt_box().splitlines())
 
         for name in ("README.md", "design.pdf"):
             drop(drops / name)
@@ -297,11 +308,11 @@ with tempfile.TemporaryDirectory(prefix="haarness-composer-") as directory:
         typed = f"compare with {drops}/README.md".replace(" ", "")
         until(lambda: "Attached 1 file" in pane() and typed in draft().replace(" ", ""),
               "a screenshot dropped with a README was not attached with the README kept as its path")
-        assert "screen\\ shot.png" not in draft() and "screen shot.png" in composer() and "pasted" not in composer(), composer()
+        assert "screen\\ shot.png" not in draft() and "screen shot.png" in prompt_box() and "pasted" not in prompt_box(), prompt_box()
         screen("drop-mixed")
         keys("C-u")
         keys("BSpace")
-        until(lambda: "screen shot.png" not in composer() and "README" not in composer(), "the mixed drop did not clear")
+        until(lambda: "screen shot.png" not in prompt_box() and "README" not in prompt_box(), "the mixed drop did not clear")
         checks.append("Drops at once: two screenshots with a narrow no-break space in their names both attach; a screenshot with a README attaches the screenshot and keeps the README's path as text")
 
         text("!")
@@ -349,7 +360,7 @@ with tempfile.TemporaryDirectory(prefix="haarness-composer-") as directory:
             shot.write_bytes(b"\x89PNG\r\n\x1a\nfixture")
         drop(*many, drops / "README.md")
         until(lambda: "Attach at most 8 files at once" in pane(), "a drop over the limit was not reported")
-        assert " img " not in composer(), composer()
+        assert " img " not in prompt_box(), prompt_box()
         screen("drop-over-limit")
         keys("Enter")
 

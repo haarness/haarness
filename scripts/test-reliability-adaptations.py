@@ -201,11 +201,16 @@ with tempfile.TemporaryDirectory(prefix='haarness-reliability-adaptations-') as 
             filtered = new(provider, 'gpt-5.4-mini', 'Filtered response ' + provider)
             filtered_session = attach(filtered)
             send(filtered_session, 'Show the filtered response fixture')
-            until(lambda: 'safety check stopped' in capture(filtered_session), 'filtered response was not explained')
+            # A content filter is a safety stop: the turn is left out of later
+            # requests, which the error says, and the line under it says how
+            # to reword the message.
+            until(lambda: "Stopped by the provider's safety check (content_filter)" in capture(filtered_session)
+                  and '/undo to edit and resend' in capture(filtered_session), 'filtered response was not explained')
             idle()
             items = api(f'/threads/{filtered}/items')
             assert any(item['data']['type'] == 'assistant_message' and item['data']['text'] == 'PARTIAL_FILTER_PROOF' for item in items), items
-            assert any(item['data']['type'] == 'error' and not item['data']['retryable'] for item in items), items
+            assert any(item['data']['type'] == 'error' and not item['data']['retryable'] and item['data'].get('turn_left_out')
+                       for item in items), items
             assert not (workspace / 'must-not-exist').exists()
             proof('filtered-' + provider + '-wire-and-tui', filtered_session)
         state['response'] = 'ok'
