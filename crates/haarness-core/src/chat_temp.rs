@@ -474,10 +474,16 @@ fn shared_base(make: bool) -> Option<PathBuf> {
     None
 }
 
-/// The user's own temp folder's `haarness`.
+/// `haarness` in the user's own temp folder, `%LOCALAPPDATA%\\Temp`, whatever
+/// `TMP` or `TEMP` says: a folder another account can write to (a shared
+/// `C:\\Temp`) is never used.
 #[cfg(not(unix))]
 fn shared_base(make: bool) -> Option<PathBuf> {
-    let temp = crate::paths::canonicalize(std::env::temp_dir()).ok()?;
+    let local = PathBuf::from(std::env::var_os("LOCALAPPDATA")?);
+    if !local.is_absolute() {
+        return None;
+    }
+    let temp = crate::paths::canonicalize(local.join("Temp")).ok()?;
     let folder = temp.join("haarness");
     private(&folder, make).then_some(folder)
 }

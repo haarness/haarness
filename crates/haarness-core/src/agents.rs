@@ -241,7 +241,13 @@ pub(crate) fn custom_system_prompt_with_context(
 /// ([`crate::chat_temp`]). It names no path, which differs from chat to chat
 /// (its commands get it in `TMPDIR`), so every chat of a project shares one
 /// cached prompt prefix.
+#[cfg(not(windows))]
 const CHAT_TEMP_LINE: &str = "Scratch files belong in this chat's private temporary folder, which shell commands find in TMPDIR (also TMP and TEMP) and subagents share: unlike /tmp, using it asks for no approval. A file tool reaches it by its full path, which `echo $TMPDIR` prints.";
+
+/// [`CHAT_TEMP_LINE`] where commands may run in cmd.exe, which spells the
+/// variable otherwise (Git's bash shows it as `C:/Users/…`).
+#[cfg(windows)]
+const CHAT_TEMP_LINE: &str = "Scratch files belong in this chat's private temporary folder, which shell commands find in TMPDIR (also TMP and TEMP) and subagents share: unlike /tmp, using it asks for no approval. A file tool reaches it by its full path, which `echo $TMPDIR` prints (in cmd.exe, `echo %TMPDIR%`).";
 
 fn runtime_context_prompt(context: &SystemPromptContext<'_>) -> String {
     let mut prompt = format!(
