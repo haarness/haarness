@@ -385,8 +385,8 @@ fn summary(command: &Command, result: &serde_json::Value) -> Result<String> {
     Ok(text)
 }
 
-/// The line naming the links a save left out because they lead outside the
-/// saved folders: the first three by path, then how many more.
+/// The line naming the links a save left out because they lead to files a
+/// profile does not save: the first three by path, then how many more.
 fn skipped_links(paths: &[&str]) -> Option<String> {
     let (named, rest) = paths.split_at(paths.len().min(3));
     let list = if rest.is_empty() {
@@ -397,10 +397,10 @@ fn skipped_links(paths: &[&str]) -> Option<String> {
     match paths.len() {
         0 => None,
         1 => Some(format!(
-            "Skipped 1 link that leads outside the saved folders: {list}"
+            "Skipped 1 link to files a profile does not save: {list}"
         )),
         count => Some(format!(
-            "Skipped {count} links that lead outside the saved folders: {list}"
+            "Skipped {count} links to files a profile does not save: {list}"
         )),
     }
 }
@@ -580,16 +580,16 @@ mod tests {
         assert_eq!(
             skipped_links(&["/home/sam/.config/haarness/skills/fmt"]).as_deref(),
             Some(
-                "Skipped 1 link that leads outside the saved folders: /home/sam/.config/haarness/skills/fmt"
+                "Skipped 1 link to files a profile does not save: /home/sam/.config/haarness/skills/fmt"
             )
         );
         assert_eq!(
             skipped_links(&["/a", "/b"]).as_deref(),
-            Some("Skipped 2 links that lead outside the saved folders: /a, /b")
+            Some("Skipped 2 links to files a profile does not save: /a, /b")
         );
         assert_eq!(
             skipped_links(&["/a", "/b", "/c", "/d", "/e"]).as_deref(),
-            Some("Skipped 5 links that lead outside the saved folders: /a, /b, /c and 2 more")
+            Some("Skipped 5 links to files a profile does not save: /a, /b, /c and 2 more")
         );
     }
 }

@@ -423,7 +423,7 @@ fn real_cli_saves_linked_skills_and_names_the_links_it_left_out() {
     let summary = String::from_utf8_lossy(&summary.stdout);
     assert!(
         summary.contains(&format!(
-            "Skipped 1 link that leads outside the saved folders: {}\n",
+            "Skipped 1 link to files a profile does not save: {}\n",
             linked.display()
         )),
         "{summary}"
