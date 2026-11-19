@@ -27629,6 +27629,69 @@ fn a_file_dropped_into_shell_mode_stays_its_path() {
     let _ = std::fs::remove_dir_all(root);
 }
 
+/// A drop of a screenshot and other files attaches the screenshot and types
+/// the other paths in where the caret is, as the terminal wrote them and
+/// never folded into a paste chip, however long; in shell mode every path
+/// stays text.
+#[test]
+fn a_drop_of_media_and_other_files_attaches_the_media_and_types_the_rest() {
+    let root = std::env::temp_dir().join(format!("haarness-drop-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&root).unwrap();
+    let as_dropped = |path: &std::path::Path| {
+        if cfg!(windows) {
+            format!("\"{}\"", path.display())
+        } else {
+            path.display().to_string().replace(' ', "\\ ")
+        }
+    };
+    let image = root.join("screen shot.png");
+    std::fs::write(&image, b"png fixture").unwrap();
+    let others: Vec<_> = (1..=7)
+        .map(|index| {
+            let other = root.join(format!("{} notes {index}.md", "long ".repeat(28)));
+            std::fs::write(&other, "# Notes\n").unwrap();
+            other
+        })
+        .collect();
+    let typed = others
+        .iter()
+        .map(|other| as_dropped(other))
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(typed.len() > 1_000, "{}", typed.len());
+    let dropped = format!("{} {typed} ", as_dropped(&image));
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+
+    app.composer.set_text_split("compare ", "with the notes");
+    app.paste_into_prompt(&dropped, false);
+    assert_eq!(
+        app.attachments,
+        vec![dunce::canonicalize(&image).unwrap().display().to_string()]
+    );
+    assert_eq!(
+        app.composer.text(),
+        format!("compare {typed} with the notes")
+    );
+    assert_eq!(app.composer.expanded_text(), app.composer.text());
+    assert_eq!(app.notice, "Attached 1 file · backspace removes");
+    assert!(app.slash_suggestions().is_none());
+
+    // Shell mode reads only the prompt's text: the whole drop stays text.
+    let thread = fixture_thread();
+    let mut app = App::new(thread.clone(), vec![thread], vec![], vec![], vec![]);
+    app.shell_mode = true;
+    app.notice.clear();
+    app.composer.set_text("ls -l ".into());
+    let short = format!("{} {} ", as_dropped(&image), as_dropped(&others[0]));
+    app.paste_into_prompt(&short, false);
+    assert!(app.attachments.is_empty());
+    assert_eq!(app.composer.text(), format!("ls -l {short}"));
+    assert!(app.notice.is_empty(), "{}", app.notice);
+
+    let _ = std::fs::remove_dir_all(root);
+}
+
 fn computer_event(
     thread: &Thread,
     id: &str,

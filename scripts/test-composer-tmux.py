@@ -289,7 +289,20 @@ with tempfile.TemporaryDirectory(prefix="haarness-composer-") as directory:
         keys("BSpace")
         keys("BSpace")
         until(lambda: "9.41.0" not in composer(), "Backspace did not remove the two screenshots")
-        checks.append("Drops at once: two screenshots with a narrow no-break space in their names both attach")
+
+        # A screenshot dropped with a README: the screenshot is attached and
+        # the README stays its path, written in after what was typed.
+        text("compare with ")
+        drop(drops / "screen shot.png", drops / "README.md")
+        typed = f"compare with {drops}/README.md".replace(" ", "")
+        until(lambda: "Attached 1 file" in pane() and typed in draft().replace(" ", ""),
+              "a screenshot dropped with a README was not attached with the README kept as its path")
+        assert "screen\\ shot.png" not in draft() and "screen shot.png" in composer() and "pasted" not in composer(), composer()
+        screen("drop-mixed")
+        keys("C-u")
+        keys("BSpace")
+        until(lambda: "screen shot.png" not in composer() and "README" not in composer(), "the mixed drop did not clear")
+        checks.append("Drops at once: two screenshots with a narrow no-break space in their names both attach; a screenshot with a README attaches the screenshot and keeps the README's path as text")
 
         text("!")
         until(lambda: "shell — Enter runs the command" in pane(), "shell mode did not open")
@@ -309,7 +322,23 @@ with tempfile.TemporaryDirectory(prefix="haarness-composer-") as directory:
             return any(item["data"]["type"] == "tool_result" and "screen shot.png" in item["data"].get("output", "")
                        for item in items())
         until(listed, "the shell command did not get the dropped path")
-        checks.append("Shell mode: a dropped image stays its path and the command runs on it")
+        idle()
+        # A drop of an image and a README in shell mode: both stay paths.
+        text("!")
+        until(lambda: "shell — Enter runs the command" in pane(), "shell mode did not open again")
+        text("wc -c ")
+        drop(drops / "screen shot.png", drops / "README.md")
+        kept = f"{drops}/screen\\ shot.png {drops}/README.md".replace(" ", "")
+        until(lambda: kept in draft().replace(" ", ""), "a mixed drop in shell mode did not stay its paths")
+        assert "Attached" not in pane(), pane()
+        screen("drop-shell-mixed")
+        keys("Enter")
+
+        def counted():
+            return any(item["data"]["type"] == "tool_result" and "README.md" in item["data"].get("output", "")
+                       and "screen shot.png" in item["data"].get("output", "") for item in items())
+        until(counted, "the shell command did not get both dropped paths")
+        checks.append("Shell mode: a dropped image, alone or with a README, stays its path and the command runs on it")
 
         before = len(items())
         text(f"Summarise @{drops}/scan")

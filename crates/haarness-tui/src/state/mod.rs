@@ -2978,14 +2978,17 @@ impl App {
     pub fn paste_into_prompt(&mut self, text: &str, uploads: bool) {
         // A shell command reads only the prompt's text, so in shell mode a
         // dropped file stays its path.
-        let paths = if self.shell_mode {
+        let dropped = if self.shell_mode {
             Ok(None)
         } else {
             crate::media::paths_from_paste(text, &self.attachments, self.language, uploads)
         };
-        match paths {
-            Ok(Some(paths)) => {
-                let added = self.add_attachments(paths);
+        match dropped {
+            Ok(Some(dropped)) => {
+                let added = self.add_attachments(dropped.media);
+                // Other files dropped with the media stay their paths, typed
+                // in where the caret is, never folded into a paste chip.
+                self.composer.insert_str(&dropped.text);
                 self.notice = format!(
                     "Attached {added} file{} · backspace removes",
                     if added == 1 { "" } else { "s" }
