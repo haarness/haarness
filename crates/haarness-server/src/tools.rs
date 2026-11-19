@@ -4322,7 +4322,12 @@ impl Tool for BuiltinTool {
                         &tool_output_dir(),
                         &shell_environment(&context),
                         agent,
-                        context.execution.temp_folder.as_deref(),
+                        context.execution.temp_folder.as_deref().map(|path| {
+                            haarness_ripgrep::TempFolder {
+                                path,
+                                required: context.execution.temp_folder_named,
+                            }
+                        }),
                     )
                     .await
                 } else {
@@ -4334,7 +4339,12 @@ impl Tool for BuiltinTool {
                         &tool_output_dir(),
                         &shell_environment(&context),
                         agent,
-                        context.execution.temp_folder.as_deref(),
+                        context.execution.temp_folder.as_deref().map(|path| {
+                            haarness_ripgrep::TempFolder {
+                                path,
+                                required: context.execution.temp_folder_named,
+                            }
+                        }),
                     )
                     .await
                 };

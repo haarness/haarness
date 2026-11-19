@@ -185,18 +185,30 @@ pub fn shell_command(script: &str, windows_bash: Option<&Path>) -> io::Result<Co
     shell_command_in(script, windows_bash, None)
 }
 
+/// A chat's own temp folder, which its command gets as `TMPDIR`, `TMP` and
+/// `TEMP` (see [`shell_command_in`]).
+#[derive(Debug, Clone, Copy)]
+pub struct TempFolder<'a> {
+    pub path: &'a Path,
+    /// The command's permission read the variables as the folder, so it
+    /// does not run without the folder there.
+    pub required: bool,
+}
+
 /// [`shell_command`] for a chat's command, which gets `temp` (its own temp
 /// folder) as `TMPDIR`, `TMP` and `TEMP`. A login shell's profiles run after
 /// the environment is set and may set them again, so they are set again on
 /// the script's first line, as the bundled rg's folder is put back on
-/// `PATH`, from an argument no profile changes. Should a profile keep one
-/// of them read-only, the script does not run: its permission was checked
-/// with the folder there. In cmd.exe, which runs no profile, they are set
-/// in the environment alone.
+/// `PATH`, from an argument a profile does not change, after a look that it
+/// is still the one argument left and a folder. Should that fail (a profile
+/// that keeps one of them read-only, or that changed the arguments), a
+/// script whose permission was checked with the folder there does not run,
+/// and says how to put it right; any other runs with what the profile set.
+/// In cmd.exe, which runs no profile, they are set in the environment alone.
 pub fn shell_command_in(
     script: &str,
     windows_bash: Option<&Path>,
-    temp: Option<&Path>,
+    temp: Option<TempFolder<'_>>,
 ) -> io::Result<Command> {
     shell_from(script, binary_path(), windows_bash, temp)
 }
@@ -205,7 +217,7 @@ fn shell_from(
     script: &str,
     binary: io::Result<PathBuf>,
     windows_bash: Option<&Path>,
-    temp: Option<&Path>,
+    temp: Option<TempFolder<'_>>,
 ) -> io::Result<Command> {
     let mut command = match binary {
         Ok(binary) => shell_with_binary(script, Some(&binary), windows_bash, temp),
@@ -216,7 +228,7 @@ fn shell_from(
     }?;
     if let Some(temp) = temp {
         for name in TEMP_VARIABLES {
-            command.env(name, temp);
+            command.env(name, temp.path);
         }
     }
     Ok(command)
@@ -226,10 +238,27 @@ fn shell_from(
 const TEMP_VARIABLES: [&str; 3] = ["TMPDIR", "TMP", "TEMP"];
 
 /// The script's line that sets the temp folder variables again from the
-/// next argument (see [`shell_command_in`]). `command` keeps a read-only
-/// one from ending the shell before it says why.
-const TEMP_LINE: &str = "command export TMPDIR=\"$1\" TMP=\"$1\" TEMP=\"$1\" 2>/dev/null || { \
-     printf '%s\\n' 'The login profile keeps TMPDIR, TMP or TEMP read-only, so the temp folder of this chat could not be set; the command did not run.' >&2; exit 126; }; shift; ";
+/// next argument (see [`shell_command_in`]), when it is the one argument
+/// left and a folder; `command` keeps a read-only one from ending the shell.
+/// Then the arguments are cleared, however many a profile left.
+const TEMP_LINE: &str = "[ \"$#\" -eq 1 ] && [ -d \"$1\" ] && \
+     command export TMPDIR=\"$1\" TMP=\"$1\" TEMP=\"$1\" 2>/dev/null; shift $#; ";
+
+/// [`TEMP_LINE`] for a script whose permission was checked with the folder
+/// there: when it cannot be set, the script does not run, and says why.
+const REQUIRED_TEMP_LINE: &str = "{ [ \"$#\" -eq 1 ] && [ -d \"$1\" ] && \
+     command export TMPDIR=\"$1\" TMP=\"$1\" TEMP=\"$1\" 2>/dev/null; } || { \
+     printf '%s\\n' 'This command reads TMPDIR, TMP or TEMP as the temp folder of this chat, but the login profile keeps one of them read-only or changed the arguments of the shell, so the folder could not be set and the command did not run. Remove readonly for TMPDIR, TMP and TEMP from the profile.' >&2; \
+     exit 126; }; shift; ";
+
+/// The line [`shell_with_binary`] puts first for `temp`.
+fn temp_line(temp: Option<TempFolder<'_>>) -> &'static str {
+    match temp {
+        Some(TempFolder { required: true, .. }) => REQUIRED_TEMP_LINE,
+        Some(_) => TEMP_LINE,
+        None => "",
+    }
+}
 
 /// `argument` as the MSYS and Cygwin runtime reads a Windows command line
 /// back into one word: always in double quotes (an unquoted word holding
@@ -254,7 +283,7 @@ fn shell_with_binary(
     script: &str,
     binary: Option<&Path>,
     windows_bash: Option<&Path>,
-    temp: Option<&Path>,
+    temp: Option<TempFolder<'_>>,
 ) -> io::Result<Command> {
     #[cfg(windows)]
     let mut command = {
@@ -268,7 +297,7 @@ fn shell_with_binary(
             // (`C:/Users/…`), which Git's tools and Windows programs both
             // read, and `echo $TMPDIR` shows a path the file tools take
             // (Git's runtime would have made it `/tmp/…`).
-            let line = if temp.is_some() { TEMP_LINE } else { "" };
+            let line = temp_line(temp);
             let mut command = Command::new(bash);
             command
                 .raw_arg("-lc")
@@ -279,7 +308,7 @@ fn shell_with_binary(
                 .env("MSYS2_PATH_TYPE", "inherit")
                 .env_remove("CDPATH");
             if let Some(temp) = temp {
-                let forward = temp.to_string_lossy().replace('\\', "/");
+                let forward = temp.path.to_string_lossy().replace('\\', "/");
                 command.raw_arg("sh").raw_arg(msys_quoted(&forward));
             }
             command
@@ -307,7 +336,7 @@ fn shell_with_binary(
             ""
         };
         // Then the chat's own temp folder, over what a profile set.
-        let line = if temp.is_some() { TEMP_LINE } else { "" };
+        let line = temp_line(temp);
         command
             .args([
                 "-lc",
@@ -320,7 +349,7 @@ fn shell_with_binary(
             .arg(binary.map_or_else(PathBuf::new, |binary| {
                 binary.parent().expect("binary directory").to_path_buf()
             }))
-            .args(temp)
+            .args(temp.map(|temp| temp.path))
             .env_remove("CDPATH");
         command
     };
@@ -543,8 +572,12 @@ mod tests {
 
     /// A chat's command gets its own temp folder as `TMPDIR`, `TMP` and
     /// `TEMP` whatever a login profile sets them to, with no argument left
-    /// over; a profile that keeps one read-only stops the command with a
-    /// line that says why. Without a folder, the profile's value stays.
+    /// over. Where a profile keeps one read-only, or changes the arguments
+    /// (shells other than macOS's `sh` show them to it), a command whose
+    /// permission read the variables as the folder stops with a line that
+    /// says how to put it right, and any other runs with what the profile
+    /// set; never with an empty `TMPDIR`. Without a folder, the profile's
+    /// value stays.
     #[cfg(unix)]
     #[test]
     fn a_chat_s_temp_folder_wins_over_what_a_login_profile_sets() {
@@ -552,40 +585,61 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let temp = tempfile::tempdir().unwrap();
         let script = r#"printf '%s|%s|%s|%s' "$TMPDIR" "$TMP" "$TEMP" "$#""#;
-        let run = |temp: Option<&Path>| {
+        let run = |temp: Option<&Path>, required: bool| {
+            let temp = temp.map(|path| TempFolder { path, required });
             shell_with_binary(script, Some(&root.path().join("bin/rg")), None, temp)
                 .unwrap()
                 .current_dir(root.path())
                 .env("HOME", home.path())
-                .envs(temp.map(|temp| ("TMPDIR", temp)))
+                .envs(temp.map(|temp| ("TMPDIR", temp.path)))
                 .output()
                 .unwrap()
         };
-        fs::write(
-            home.path().join(".profile"),
-            "export TMPDIR=/profile TMP=/profile TEMP=/profile\n",
-        )
-        .unwrap();
+        let profile = |text: &str| fs::write(home.path().join(".profile"), text).unwrap();
         let shown = temp.path().display();
-        let output = run(Some(temp.path()));
-        assert!(output.status.success(), "{output:?}");
-        assert_eq!(
-            String::from_utf8_lossy(&output.stdout),
-            format!("{shown}|{shown}|{shown}|0")
-        );
-        let output = run(None);
+        let own = format!("{shown}|{shown}|{shown}|0");
+        profile("export TMPDIR=/profile TMP=/profile TEMP=/profile\n");
+        for required in [true, false] {
+            let output = run(Some(temp.path()), required);
+            assert!(output.status.success(), "{output:?}");
+            assert_eq!(String::from_utf8_lossy(&output.stdout), own);
+        }
+        let output = run(None, false);
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
             "/profile|/profile|/profile|0"
         );
-        fs::write(home.path().join(".profile"), "readonly TMPDIR=/profile\n").unwrap();
-        let output = run(Some(temp.path()));
+        profile("readonly TMPDIR=/profile\n");
+        let output = run(Some(temp.path()), true);
         assert_eq!(output.status.code(), Some(126), "{output:?}");
         assert!(output.stdout.is_empty(), "{output:?}");
         assert!(
-            String::from_utf8_lossy(&output.stderr).contains("read-only"),
+            String::from_utf8_lossy(&output.stderr).contains("Remove readonly"),
             "{output:?}"
         );
+        let output = run(Some(temp.path()), false);
+        assert!(output.status.success(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).starts_with("/profile|"),
+            "{output:?}"
+        );
+        // A profile that empties the arguments the line reads: the command
+        // runs with the folder, or does not run at all (dash stops at the
+        // first `shift` with none left, as it did before chats had folders).
+        for emptying in ["set --\n", "set -- '' ''\n", "shift\n"] {
+            profile(emptying);
+            for required in [true, false] {
+                let output = run(Some(temp.path()), required);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let stopped = stdout.is_empty() && !output.status.success();
+                let with_folder = if required {
+                    stdout == own
+                } else {
+                    stdout.starts_with(&format!("{shown}|"))
+                };
+                assert!(with_folder || stopped, "{emptying}: {output:?}");
+            }
+        }
     }
 
     #[cfg(unix)]

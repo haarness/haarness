@@ -148,7 +148,7 @@ async fn spawn(
     directory: &Path,
     env: &BTreeMap<String, String>,
     agent: Option<ThreadId>,
-    temp: Option<&Path>,
+    temp: Option<haarness_ripgrep::TempFolder<'_>>,
 ) -> CoreResult<Spawned> {
     // Git for Windows' bash on Windows when Git is installed, else cmd.exe;
     // the choice is gone before anything here waits.
@@ -457,7 +457,7 @@ pub(crate) async fn run(
     directory: &Path,
     env: &BTreeMap<String, String>,
     agent: Option<ThreadId>,
-    temp: Option<&Path>,
+    temp: Option<haarness_ripgrep::TempFolder<'_>>,
 ) -> CoreResult<ToolOutput> {
     // A command with no deadline can print until it is stopped (`npm run
     // dev`, `tail -f`): its saved output keeps only its start.
@@ -516,7 +516,7 @@ pub(crate) async fn run_call(
     directory: &Path,
     env: &BTreeMap<String, String>,
     agent: Option<ThreadId>,
-    temp: Option<&Path>,
+    temp: Option<haarness_ripgrep::TempFolder<'_>>,
 ) -> CoreResult<ToolOutput> {
     call.check_start(request.background)?;
     // A deadline in the foreground saves all of the output; without one
@@ -1322,8 +1322,8 @@ mod tests {
             agent,
             None,
         )
-            .await
-            .unwrap();
+        .await
+        .unwrap();
         assert_eq!(output.metadata["exit"], 0, "{output:?}");
         output.metadata["stdout"].as_str().unwrap().to_owned()
     }

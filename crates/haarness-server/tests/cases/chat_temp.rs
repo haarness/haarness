@@ -586,6 +586,34 @@ async fn a_login_profile_cannot_move_the_chat_s_temp_folder() {
     assert!(home.join("mytmp/keep.txt").is_file());
     assert!(!home.join("mytmp/made.txt").exists());
     assert!(folder.join("made.txt").is_file());
+    // A login shell inside the line reads the profile again: its `$TMPDIR`
+    // is checked as before, and asks.
+    asks_outside(&runtime, thread, &bash(r#"bash -lc 'rm -rf "$TMPDIR"/*'"#)).await;
+    assert!(home.join("mytmp/keep.txt").is_file());
+    haarness_core::chat_temp::remove(thread);
+}
+
+/// A login profile that keeps `TMPDIR` read-only stops only a command whose
+/// check read it as the chat's folder, with a line that says what to change;
+/// any other command runs as before.
+#[tokio::test]
+async fn a_read_only_temp_variable_stops_only_commands_that_use_the_folder() {
+    let fixture = Fixture::new();
+    let home = fixture.0.join("home");
+    std::fs::create_dir_all(home.join("mytmp")).unwrap();
+    std::fs::write(home.join(".profile"), "readonly TMPDIR=\"$HOME/mytmp\"\n").unwrap();
+    let (runtime, _) = runtime(
+        &fixture.project(),
+        Some(Arc::new(ProfileHome(home.clone()))),
+    );
+    let thread = new_chat(&runtime).await;
+    runs_unasked(&runtime, thread, &bash("echo hello")).await;
+    assert_eq!(last_output(&runtime, thread).await, "exit: 0\nhello\n");
+    runs_unasked(&runtime, thread, &bash(r#"echo x > "$TMPDIR/x.txt""#)).await;
+    let (_, output, _) = results(&runtime, thread).await.pop().unwrap();
+    assert!(output.starts_with("exit: 126\n"), "{output}");
+    assert!(output.contains("Remove readonly"), "{output}");
+    assert!(!home.join("mytmp/x.txt").exists());
     haarness_core::chat_temp::remove(thread);
 }
 
