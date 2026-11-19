@@ -305,22 +305,23 @@ async fn parity_secret_reads_follow_the_file_really_opened_and_spare_node_module
         assert!(result.is_error);
         assert!(!result.output.text.contains("secret"));
     }
-    // A secret's name in any case asks too, about the file as it is named.
-    std::fs::write(fixture.0.join("Prod.ENV"), "secret").unwrap();
+    // A name that ends in `.env` in another case asks too, about the file
+    // as it is named; a source file whose name only holds `.Env` does not.
+    std::fs::write(fixture.0.join("Staging.ENV"), "secret").unwrap();
     let r = runtime.clone();
     let id = thread.id;
     let call = tokio::spawn(async move {
         r.run_direct_tool(
             id,
             "read",
-            json!({"path":"Prod.ENV"}),
+            json!({"path":"Staging.ENV"}),
             CancellationToken::new(),
         )
         .await
     });
     let approval = pending(&runtime).await;
     assert_eq!(approval.permission, "read");
-    assert_eq!(approval.patterns, vec!["Prod.ENV"]);
+    assert_eq!(approval.patterns, vec!["Staging.ENV"]);
     runtime
         .reply_permission(
             &approval.permission_id,
@@ -334,6 +335,24 @@ async fn parity_secret_reads_follow_the_file_really_opened_and_spare_node_module
     let result = call.await.unwrap().unwrap();
     assert!(result.is_error);
     assert!(!result.output.text.contains("secret"));
+    std::fs::write(fixture.0.join("Theme.Env.ts"), "export const theme = 1;").unwrap();
+    let r = runtime.clone();
+    let read = tokio::spawn(async move {
+        r.run_direct_tool(
+            id,
+            "read",
+            json!({"path":"Theme.Env.ts"}),
+            CancellationToken::new(),
+        )
+        .await
+    });
+    let result = tokio::time::timeout(std::time::Duration::from_secs(20), read)
+        .await
+        .expect("a source file is read without asking")
+        .unwrap()
+        .unwrap();
+    assert!(!result.is_error);
+    assert!(result.output.text.contains("theme = 1"));
     // Search tools never ask; they leave the secret out and say so.
     let result = runtime
         .run_direct_tool(

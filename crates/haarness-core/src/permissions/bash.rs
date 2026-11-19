@@ -133,6 +133,25 @@ pub enum Naming {
     Printed,
 }
 
+/// What a command takes from a path it is given, for
+/// [`Reader::name_path`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Taken {
+    /// Nothing of what the file holds: it writes it, or only looks at it.
+    Unread,
+    /// What the file holds.
+    Read,
+    /// Its name, which `echo` or `printf` prints: a secret's name counts
+    /// only as written.
+    Name,
+}
+
+impl Taken {
+    fn by(reads: bool) -> Self {
+        if reads { Self::Read } else { Self::Unread }
+    }
+}
+
 /// A directory change in an `&&` chain: where it starts in the line, and
 /// where it leads as written (`raw`, value), or `None` when nobody can tell.
 pub type DirectoryChange = (usize, Option<(String, String)>);
@@ -1767,7 +1786,7 @@ impl Reader<'_> {
                     &value,
                     complete,
                     outside.as_deref(),
-                    reads,
+                    Taken::by(reads),
                     reach.picks(),
                 );
                 if reads && complete {
@@ -2811,7 +2830,7 @@ impl Reader<'_> {
             value,
             complete,
             outside.as_deref(),
-            reads,
+            Taken::by(reads),
             reach.picks(),
         );
         if reads && complete {
@@ -2846,29 +2865,34 @@ impl Reader<'_> {
     /// Record a path a command is given or a redirect names when it leads
     /// outside the project (`outside`, the folder [`external_dir`] found),
     /// may name where Haarness keeps sign-ins, or is a secret file the
-    /// command `reads`: see [`BashAnalysis::paths`].
+    /// command reads (`taken`): see [`BashAnalysis::paths`].
     fn name_path(
         &mut self,
         raw: &str,
         value: &str,
         complete: bool,
         outside: Option<&Path>,
-        reads: bool,
+        taken: Taken,
         picked: bool,
     ) {
+        let reads = taken != Taken::Unread;
         // Every secret name holds `.env`; the test is cheap for the rest. A
         // link of another name (`notes.txt -> .env`) is judged by where it
         // leads. A glob counts by its text too (`*.env`), beside what it
         // reaches (see [`Self::name_glob_secrets`]): the shell may expand it
         // further than Haarness does (brace lists, `**`, options it sets).
+        // In another case (`.ENV`, `Prod.ENV`) only a file that is there
+        // counts, judged where it really is (on a disk that ignores case
+        // `.ENV` opens `.env`), so a name in code (`.Config.Env`) is none.
         let globbed = complete && unquoted_glob(raw);
         let named = complete
             && reads
-            && holds_env(value)
-            && crate::permissions::is_secret_path(Path::new(value));
+            && value.contains(".env")
+            && crate::permissions::is_secret_name(Path::new(value));
+        let cased = complete && taken == Taken::Read && !named && holds_env(value);
         let linked = complete && reads && !named && !globbed && is_link(self.from(), raw, value);
         let credential = complete && crate::permissions::may_name_credential_store(value);
-        if outside.is_none() && !named && !linked && !credential {
+        if outside.is_none() && !named && !cased && !linked && !credential {
             return;
         }
         let target = if complete {
@@ -2883,8 +2907,10 @@ impl Reader<'_> {
             Some(expanded) => resolve(self.from(), &expanded),
             None => resolve(self.from(), Path::new(target)),
         };
-        let secret =
-            (named || (linked && crate::permissions::is_secret_path(&path))) && !path.is_dir();
+        let secret = !path.is_dir()
+            && (named
+                || (linked && crate::permissions::is_secret_path(&path))
+                || (cased && path.is_file() && crate::permissions::is_secret_path(&path)));
         if outside.is_none() && !secret && !credential {
             return;
         }
@@ -2978,10 +3004,14 @@ impl Reader<'_> {
             }
         }
         for (candidate, link) in found {
-            // Its name says it is a secret, or it may be a link to one.
-            let named = holds_env(&candidate.to_string_lossy())
-                && crate::permissions::is_secret_path(&candidate);
-            if !named && link == Some(false) {
+            // Its name says it is a secret, or it may be a link to one; a
+            // name in another case only once it is looked at (see
+            // [`Self::name_path`]).
+            let text = candidate.to_string_lossy();
+            let named = text.contains(".env") && crate::permissions::is_secret_name(&candidate);
+            let cased =
+                !named && holds_env(&text) && crate::permissions::is_secret_path(&candidate);
+            if !named && !cased && link == Some(false) {
                 continue;
             }
             if self.glob_looks == 0 {
@@ -2991,7 +3021,7 @@ impl Reader<'_> {
                 continue;
             }
             self.glob_looks -= 1;
-            if !named && !candidate.is_symlink() {
+            if !named && !cased && !candidate.is_symlink() {
                 continue;
             }
             let path = resolve(Path::new("/"), &candidate);
@@ -3522,6 +3552,7 @@ impl Reader<'_> {
         // literal path (`jq . <data>/auth.json`), unless it only looks at
         // the file (`ls -l`, `stat`, `test -f`).
         if complete && !self.path_command(&name) && !LOOKS_ONLY.contains(&name.as_str()) {
+            let prints = matches!(name.as_str(), "echo" | "printf");
             for word in arguments {
                 let (value, complete) = path_literal(word.node, source);
                 // An option's value as well (`--files0-from=<file>`).
@@ -3530,10 +3561,11 @@ impl Reader<'_> {
                     _ => value,
                 };
                 let named_from = self.analysis.paths.len();
-                self.name_path(&word.raw, &value, complete, None, true, false);
+                let taken = if prints { Taken::Name } else { Taken::Read };
+                self.name_path(&word.raw, &value, complete, None, taken, false);
                 // `echo` and `printf` print the names they are given, and
                 // `du` sums the sizes of what a glob matches.
-                if matches!(name.as_str(), "echo" | "printf") {
+                if prints {
                     for named in self.analysis.paths.iter_mut().skip(named_from) {
                         named.naming = Naming::Printed;
                     }
@@ -3690,17 +3722,16 @@ fn later_stages(node: tree_sitter::Node<'_>) -> Option<std::ops::Range<usize>> {
     None
 }
 
-/// Whether a glob's last part may match a secret's name, in any case: its
-/// literal end does not rule one out (`.e*`, `.E*`, `*`, `*.env*`, `*nv`),
-/// as `*.rs` does.
+/// Whether a glob's last part may match a secret's name: its literal end
+/// does not rule one out (`.e*`, `*`, `*.env*`, `*nv`), as `*.rs` does.
 pub(crate) fn may_match_secret(part: &str) -> bool {
-    let part = part.to_ascii_lowercase();
-    let end = part.rsplit(['*', '?', ']']).next().unwrap_or(&part);
+    let end = part.rsplit(['*', '?', ']']).next().unwrap_or(part);
     end.is_empty() || part.contains("env") || ".env".ends_with(end)
 }
 
-/// Whether `text` holds `.env` in any case, as every secret's name does
-/// (see [`crate::permissions::is_secret_path`]): the cheap test first.
+/// Whether `text` holds `.env` in any case, as the name of every secret
+/// file does (see [`crate::permissions::is_secret_path`]): the cheap test
+/// first.
 fn holds_env(text: &str) -> bool {
     text.as_bytes()
         .windows(4)

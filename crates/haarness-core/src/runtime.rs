@@ -21241,7 +21241,16 @@ mod shell_reading_tests {
         std::fs::create_dir_all(project.join("src")).unwrap();
         std::fs::write(project.join(".env"), "TOKEN=x").unwrap();
         std::fs::write(project.join("src/main.rs"), "fn main() {}").unwrap();
-        std::fs::write(project.join("src/Prod.ENV"), "TOKEN=x").unwrap();
+        std::fs::create_dir_all(project.join("deploy")).unwrap();
+        std::fs::write(project.join("deploy/Staging.ENV"), "TOKEN=x").unwrap();
+        std::fs::write(project.join("deploy/.env.local"), "TOKEN=x").unwrap();
+        // A workspace package linked into node_modules, as npm and pnpm do.
+        std::fs::create_dir_all(project.join("packages/api")).unwrap();
+        std::fs::create_dir_all(project.join("node_modules/@w")).unwrap();
+        std::fs::write(project.join("packages/api/.env"), "TOKEN=x").unwrap();
+        std::os::unix::fs::symlink("../../packages/api", project.join("node_modules/@w/api"))
+            .unwrap();
+        std::fs::write(project.join("src/Theme.Env.ts"), "export {}").unwrap();
         std::os::unix::fs::symlink(".env", project.join("notes.txt")).unwrap();
         // Haarness's defaults: shell commands run, `.env` reads ask.
         let defaults = engine(&[]);
@@ -21291,15 +21300,26 @@ mod shell_reading_tests {
             "cat .e*",
             "head -1 .?nv",
             "cat *",
-            // A secret's name in any case: `.ENV` is `.env` on a disk that
-            // ignores case, and `Prod.ENV` is named as one anywhere.
-            "cat .ENV",
-            "grep TOKEN .Env",
-            "cat src/Prod.ENV",
-            "cd src && cat Prod.ENV",
-            "cat src/P*",
+            // A file whose name ends in `.env` in another case.
+            "cat deploy/Staging.ENV",
+            "cd deploy && grep TOKEN Staging.ENV",
+            "cat deploy/S*",
+            "cat < deploy/Staging.ENV",
+            // A file that is there is judged where it really is: through a
+            // linked package, the package's own `.env`.
+            "cat node_modules/@w/api/.env",
         ] {
             assert_eq!(verdict(&defaults, command), Ask, "{command}");
+        }
+        // `.ENV` is a file only where the disk ignores case, where it is
+        // `.env` itself; elsewhere it names nothing to read.
+        let folds = project.join(".ENV").is_file();
+        for command in ["cat .ENV", "grep TOKEN .Env", "cat deploy/.ENV.LOCAL"] {
+            assert_eq!(
+                verdict(&defaults, command),
+                if folds { Ask } else { Allow },
+                "{command}"
+            );
         }
         // Looking at it, an example file, a package's fixture, or writing
         // it reads nothing secret.
@@ -21327,7 +21347,7 @@ mod shell_reading_tests {
             "echo .*",
             "printf '%s\\n' .env*",
             "cat .ENV.EXAMPLE",
-            "ls -la src/Prod.ENV",
+            "ls -la deploy/Staging.ENV",
         ] {
             assert_eq!(verdict(&defaults, command), Allow, "{command}");
         }
@@ -21352,6 +21372,46 @@ mod shell_reading_tests {
         // A blanket allow for every command is not one for this one.
         let blanket = engine(&[("bash:*", Allow)]);
         assert_eq!(verdict(&blanket, "cat .env"), Ask);
+        std::fs::remove_dir_all(&project).unwrap();
+    }
+
+    // POSIX shell text: Windows runs commands in cmd.exe.
+    #[cfg(unix)]
+    #[test]
+    fn names_in_code_and_source_files_read_no_secret() {
+        let project =
+            std::env::temp_dir().join(format!("haarness-code-names-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::write(project.join(".env"), "TOKEN=x").unwrap();
+        std::fs::write(project.join("src/Theme.Env.ts"), "export {}").unwrap();
+        std::fs::write(project.join("inspect.json"), "{}").unwrap();
+        let defaults = engine(&[]);
+        // A word in another case counts only when it names a file that is
+        // there, and only a name that ends in `.env`; `echo` prints names.
+        for command in [
+            "jq '.Config.Env' inspect.json",
+            "docker inspect web | jq '.[0].Config.Env'",
+            "grep -rn 'cfg.Env' --include=*.go .",
+            "rg -n 'cfg\\.Env' internal",
+            "grep -rn 'settings.ENV' .",
+            "grep -rn 'BuildConfig.ENV' app/src",
+            "grep -rn '{{ .Env.' .goreleaser.yaml",
+            "cat src/Theme.Env.ts",
+            "echo .ENV >> .gitignore",
+        ] {
+            let asked: Vec<PermissionDecision> =
+                ask_plans("bash", &json!({ "command": command }), &project)
+                    .into_iter()
+                    .flat_map(|plan| {
+                        plan.patterns
+                            .iter()
+                            .map(|pattern| plan.evaluate(&defaults, pattern).decision)
+                            .collect::<Vec<_>>()
+                    })
+                    .filter(|decision| *decision != PermissionDecision::Allow)
+                    .collect();
+            assert!(asked.is_empty(), "{command}: {asked:?}");
+        }
         std::fs::remove_dir_all(&project).unwrap();
     }
 

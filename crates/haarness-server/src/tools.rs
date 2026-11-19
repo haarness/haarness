@@ -9788,16 +9788,23 @@ export default workflow({
         tokio::fs::remove_dir_all(workspace).await.unwrap();
     }
 
-    /// A secret's name counts in any case: `.ENV` is `.env` on a disk that
-    /// ignores case, and `PROD.ENV` is named as a secret anywhere.
+    /// A name that ends in `.env` counts in any case (`.ENV` is `.env` on a
+    /// disk that ignores case); a longer one, such as a source file's, as
+    /// written.
     #[cfg(unix)]
     #[tokio::test]
     async fn search_tools_skip_secret_names_in_any_case() {
         let workspace =
             std::env::temp_dir().join(format!("haarness-secret-case-{}", uuid::Uuid::now_v7()));
-        std::fs::create_dir_all(workspace.join("app")).unwrap();
+        std::fs::create_dir_all(workspace.join("web")).unwrap();
         let workspace = haarness_core::paths::canonicalize(&workspace).unwrap();
-        for file in ["PROD.ENV", "app/Local.Env.Local", "C.ENV.EXAMPLE", "d.txt"] {
+        for file in [
+            "STAGING.ENV",
+            "web/Local.ENV",
+            "web/Theme.Env.ts",
+            "CONF.ENV.SAMPLE",
+            "notes.txt",
+        ] {
             std::fs::write(workspace.join(file), format!("needle {file}\n")).unwrap();
         }
         let registry = NativeToolRegistry::new(workspace.clone());
@@ -9822,18 +9829,24 @@ export default workflow({
             }
         };
         let grep = run("grep", json!({"pattern":"needle"})).await;
-        for kept in ["needle C.ENV.EXAMPLE", "needle d.txt"] {
+        for kept in [
+            "needle web/Theme.Env.ts",
+            "needle CONF.ENV.SAMPLE",
+            "needle notes.txt",
+        ] {
             assert!(grep.text.contains(kept), "{kept}: {}", grep.text);
         }
-        for secret in ["needle PROD.ENV", "needle app/Local.Env.Local"] {
+        for secret in ["needle STAGING.ENV", "needle web/Local.ENV"] {
             assert!(!grep.text.contains(secret), "{secret}: {}", grep.text);
         }
         assert_eq!(grep.metadata["skipped"], 2);
         let glob = run("glob", json!({"pattern":"**/*"})).await;
-        assert!(glob.text.contains("C.ENV.EXAMPLE"), "{}", glob.text);
-        assert!(!glob.text.contains("PROD.ENV"), "{}", glob.text);
-        assert!(!glob.text.contains("Local.Env.Local"), "{}", glob.text);
-        let named = run("grep", json!({"pattern":"needle","path":"PROD.ENV"})).await;
+        for kept in ["web/Theme.Env.ts", "CONF.ENV.SAMPLE"] {
+            assert!(glob.text.contains(kept), "{kept}: {}", glob.text);
+        }
+        assert!(!glob.text.contains("STAGING.ENV"), "{}", glob.text);
+        assert!(!glob.text.contains("Local.ENV"), "{}", glob.text);
+        let named = run("grep", json!({"pattern":"needle","path":"STAGING.ENV"})).await;
         assert_eq!(named.metadata["skipped"], 1, "{}", named.text);
         tokio::fs::remove_dir_all(workspace).await.unwrap();
     }
