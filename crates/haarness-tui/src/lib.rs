@@ -1321,6 +1321,7 @@ async fn run_with_client(
                 app.poll_chrome(&client);
                 app.poll_command_output(&client);
                 app.poll_compactions();
+                app.release_held(&client).await;
                 app.poll_logs();
                 if app.goal_refresh_needed && app.tick.is_multiple_of(10) {
                     hydrate_goal_snapshot(&mut app, &client).await;

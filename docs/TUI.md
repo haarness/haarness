@@ -47,7 +47,9 @@ shows comes from that server over REST and SSE, and quitting it never stops the 
   (`/btw`), `input_queue.rs` (steer and queue), `background.rs` (the agents' shell commands in the
   background, `/background` and a command's output view), `compaction.rs` (`/compact` off the key
   path: the band says `compacting` until the summary lands, a refusal is said as the server words it,
-  and a request a proxy cut waits for the compaction's row, up to five minutes), `statusline.rs`,
+  and a request a proxy cut waits for the compaction's row, up to five minutes; a message sent
+  meanwhile waits above the prompt as queued, since a turn started then would void the summary, and
+  goes out once the compaction is over, or back to the prompt if it cannot), `statusline.rs`,
   `theme.rs`, `keybindings.rs`.
 - `locale.rs`: the 17 interface catalogs in `locales/`, shared with Desktop. Visible text is looked up
   by its English text, so every new string needs a key in each catalog (see

@@ -83,6 +83,38 @@ pub fn queued_strip(app: &App, width: usize) -> TaggedLines {
         }
     }
 
+    // Messages waiting for the chat's compaction: they go out once it is
+    // over, as queued work waits its turn.
+    let held = app.held_messages();
+    if !held.is_empty() {
+        let rail = theme.muted;
+        strip.push(strip_row(
+            rail,
+            header(
+                language.text("Queued"),
+                format!(" · {}", held.len()),
+                theme.text,
+                theme,
+            ),
+            theme.surface,
+            width,
+            theme,
+        ));
+        for (index, text) in held.iter().take(MAX_QUEUED_ROWS).enumerate() {
+            strip.push(numbered_row(
+                index + 1,
+                &crate::input_queue::queued_label(text),
+                rail,
+                false,
+                width,
+                theme,
+            ));
+        }
+        if let Some(more) = more_row(held.len(), rail, width, theme) {
+            strip.push(more);
+        }
+    }
+
     let queued = &app.input_queue.items;
     let editing = app.queue_edit.as_ref();
     if queued.is_empty() && editing.is_none() {

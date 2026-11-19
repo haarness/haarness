@@ -1,6 +1,7 @@
 //! `/compact` runs off the event loop: the command returns at once, the band
-//! says `compacting` until the summary lands, a refusal is said plainly, and a
-//! request a proxy cut waits for the compaction row instead of failing.
+//! says `compacting` until the summary lands, a refusal is said plainly, a
+//! request a proxy cut waits for the compaction row instead of failing, and a
+//! message sent meanwhile waits until the compaction is over.
 use super::*;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -8,11 +9,13 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 /// A server that answers its `n`th connection with `responses[n]`: a status
-/// line and body, held until `release` gives a permit when `held`.
+/// line and body, held until `release` gives a permit when `held`. `requests`
+/// holds what each was sent, in the order they were accepted.
 struct Server {
     address: std::net::SocketAddr,
     release: Arc<tokio::sync::Semaphore>,
     accepted: Arc<AtomicUsize>,
+    requests: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 fn http(status: &str, content_type: &str, body: &str) -> String {
@@ -27,12 +30,18 @@ async fn serve(responses: Vec<(bool, String)>) -> Server {
     let address = listener.local_addr().unwrap();
     let release = Arc::new(tokio::sync::Semaphore::new(0));
     let accepted = Arc::new(AtomicUsize::new(0));
-    let (gate, count) = (Arc::clone(&release), Arc::clone(&accepted));
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (gate, count, seen) = (
+        Arc::clone(&release),
+        Arc::clone(&accepted),
+        Arc::clone(&requests),
+    );
     tokio::spawn(async move {
         for (held, response) in responses {
             let (mut socket, _) = listener.accept().await.unwrap();
-            count.fetch_add(1, Ordering::SeqCst);
-            let gate = Arc::clone(&gate);
+            let index = count.fetch_add(1, Ordering::SeqCst);
+            seen.lock().unwrap().push(String::new());
+            let (gate, seen) = (Arc::clone(&gate), Arc::clone(&seen));
             tokio::spawn(async move {
                 let mut request = Vec::new();
                 let mut chunk = [0_u8; 1024];
@@ -57,6 +66,7 @@ async fn serve(responses: Vec<(bool, String)>) -> Server {
                         break;
                     }
                 }
+                seen.lock().unwrap()[index] = String::from_utf8_lossy(&request).into_owned();
                 if held {
                     gate.acquire().await.unwrap().forget();
                 }
@@ -68,6 +78,7 @@ async fn serve(responses: Vec<(bool, String)>) -> Server {
         address,
         release,
         accepted,
+        requests,
     }
 }
 
@@ -269,4 +280,191 @@ async fn a_request_a_proxy_cut_waits_for_the_compaction_row() {
         app.notification_toast.is_some(),
         "the cut is said in the end"
     );
+}
+
+/// What the server says of itself: no input settings, so Enter steers.
+fn info() -> (bool, String) {
+    (
+        false,
+        http(
+            "200 OK",
+            "application/json",
+            &serde_json::to_string(&side_server_info(vec![])).unwrap(),
+        ),
+    )
+}
+
+fn turn_started(thread: &Thread) -> (bool, String) {
+    (
+        false,
+        http(
+            "200 OK",
+            "application/json",
+            &serde_json::to_string(&fixture_running_turn(thread.id)).unwrap(),
+        ),
+    )
+}
+
+async fn enter(app: &mut App, text: &str, client: &crate::api::ApiClient) {
+    app.composer.set_text(text.into());
+    crate::input::handle_key(
+        app,
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        client,
+    )
+    .await
+    .unwrap();
+}
+
+/// The requests that started a turn, as they were sent.
+fn turns_started(server: &Server) -> Vec<String> {
+    server
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request.starts_with("POST ") && request.contains("/turns "))
+        .cloned()
+        .collect()
+}
+
+#[tokio::test]
+async fn a_message_sent_while_compacting_waits_and_goes_out_once_after_the_row() {
+    let mut app = selector_fixture();
+    let thread = app.thread.clone();
+    let item = compaction_item(&thread, "summary first");
+    let server = serve(vec![
+        (
+            true,
+            http(
+                "200 OK",
+                "application/json",
+                &serde_json::to_string(&item).unwrap(),
+            ),
+        ),
+        info(),
+        turn_started(&thread),
+    ])
+    .await;
+    let client =
+        crate::api::ApiClient::new(&format!("http://{}", server.address), "test-token").unwrap();
+
+    compact(&mut app, &client).await;
+    accepted(&server, 1).await;
+    enter(&mut app, "next, add docs", &client).await;
+    assert!(app.composer.is_empty(), "the message left the prompt");
+    assert_eq!(app.held_messages(), ["next, add docs"]);
+    let frame = frame_text(&app, (100, 24));
+    assert!(frame.contains("Queued · 1"), "{frame}");
+    assert!(frame.contains("next, add docs"), "{frame}");
+    // Nothing goes out while the summary is written, however often the tick comes.
+    for _ in 0..3 {
+        app.poll_compactions();
+        app.release_held(&client).await;
+    }
+    assert_eq!(server.accepted.load(Ordering::SeqCst), 1);
+    assert!(app.active_turn.is_none());
+
+    server.release.add_permits(1);
+    poll_until(&mut app, "the summary never landed", |app| {
+        app.compacting_since().is_none()
+    })
+    .await;
+    app.release_held(&client).await;
+    app.release_held(&client).await;
+    assert!(app.held_messages().is_empty());
+    assert!(app.active_turn.is_some(), "the message started its turn");
+    let turns = turns_started(&server);
+    assert_eq!(turns.len(), 1, "sent once: {turns:?}");
+    assert!(turns[0].contains("next, add docs"));
+    assert!(!frame_text(&app, (100, 24)).contains("Queued · 1"));
+}
+
+#[tokio::test]
+async fn a_refused_compaction_lets_the_waiting_message_go_out() {
+    let mut app = selector_fixture();
+    let thread = app.thread.clone();
+    let server = serve(vec![
+        (
+            true,
+            http(
+                "400 Bad Request",
+                "application/json",
+                r#"{"code":"invalid_request","message":"invalid request: nothing to compact"}"#,
+            ),
+        ),
+        info(),
+        turn_started(&thread),
+    ])
+    .await;
+    let client =
+        crate::api::ApiClient::new(&format!("http://{}", server.address), "test-token").unwrap();
+
+    compact(&mut app, &client).await;
+    accepted(&server, 1).await;
+    enter(&mut app, "carry on", &client).await;
+    app.release_held(&client).await;
+    assert!(turns_started(&server).is_empty(), "it waits for the answer");
+    assert_eq!(app.held_messages(), ["carry on"]);
+    server.release.add_permits(1);
+    poll_until(&mut app, "the refusal never came", |app| {
+        app.compacting_since().is_none()
+    })
+    .await;
+    assert_eq!(
+        app.notification_toast
+            .as_ref()
+            .map(|toast| toast.message.as_str()),
+        Some("nothing to compact")
+    );
+    app.release_held(&client).await;
+    assert!(app.held_messages().is_empty());
+    let turns = turns_started(&server);
+    assert_eq!(turns.len(), 1);
+    assert!(turns[0].contains("carry on"));
+}
+
+#[tokio::test]
+async fn a_waiting_message_that_cannot_go_out_comes_back_ahead_of_the_draft() {
+    let mut app = selector_fixture();
+    let thread = app.thread.clone();
+    let item = compaction_item(&thread, "summary first");
+    let server = serve(vec![
+        (
+            false,
+            http(
+                "200 OK",
+                "application/json",
+                &serde_json::to_string(&item).unwrap(),
+            ),
+        ),
+        (
+            false,
+            http(
+                "500 Internal Server Error",
+                "text/plain",
+                "Internal Server Error",
+            ),
+        ),
+    ])
+    .await;
+    let client =
+        crate::api::ApiClient::new(&format!("http://{}", server.address), "test-token").unwrap();
+
+    compact(&mut app, &client).await;
+    // Held before the answer is taken.
+    enter(&mut app, "first message", &client).await;
+    app.composer.set_text("typed meanwhile".into());
+    poll_until(&mut app, "the summary never landed", |app| {
+        app.compacting_since().is_none()
+    })
+    .await;
+    app.release_held(&client).await;
+    assert!(app.held_messages().is_empty());
+    assert_eq!(
+        app.composer.expanded_text(),
+        "first message\n\ntyped meanwhile"
+    );
+    assert!(app.notification_toast.is_some(), "why it did not go out");
+    assert!(turns_started(&server).is_empty());
 }

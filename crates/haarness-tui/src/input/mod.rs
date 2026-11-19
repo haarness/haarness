@@ -1453,6 +1453,16 @@ pub async fn handle_key_at(
                     );
                 }
                 app.refuse_command(notice);
+            } else if (!app.composer.text().trim().is_empty() || !app.attachments.is_empty())
+                && app.holds_for_compaction()
+            {
+                // Sent now, it would make the server drop the summary being
+                // written: it waits above the prompt until the chat is compacted.
+                app.hold_for_compaction(key.modifiers.contains(KeyModifiers::ALT));
+                app.scroll_to_bottom();
+                app.undo_draft = None;
+                app.mention_resources.want = None;
+                app.autocomplete_hidden = false;
             } else if !app.composer.text().trim().is_empty() || !app.attachments.is_empty() {
                 // Resolve before taking the draft; a failed settings read must
                 // preserve text and attachments for retry.

@@ -3,6 +3,10 @@
 //! 15 s deadline then said "This took too long" for a summary the server
 //! goes on to finish. Each request now runs on a worker task while the band
 //! says `compacting`, and the chat stays usable.
+//!
+//! A message sent meanwhile would start a turn, and the server then throws
+//! the summary away (the chat changed under it). So it waits above the
+//! prompt, queued, and goes out once the compaction is over, whichever way.
 
 use std::time::{Duration, Instant};
 
@@ -21,6 +25,15 @@ pub(crate) struct Compaction {
     /// finishes a summary whose request went, so this waits for the
     /// compaction to arrive, and says it only if it never does.
     unanswered: Option<String>,
+}
+
+/// A message sent while its chat was being compacted, waiting to go out.
+pub(crate) struct Held {
+    thread: ThreadId,
+    text: String,
+    attachments: Vec<String>,
+    /// Sent with Alt+Enter, which queues it.
+    queue: bool,
 }
 
 /// The same words a turn's own compaction shows in the band.
@@ -62,6 +75,99 @@ impl App {
             .filter(|compaction| compaction.thread == self.thread.id)
             .map(|compaction| compaction.started)
             .min()
+    }
+
+    /// Whether a message sent now would make the server drop the open
+    /// chat's summary: it is being compacted and nothing else runs there.
+    pub(crate) fn holds_for_compaction(&self) -> bool {
+        self.active_turn.is_none() && self.compacting_since().is_some()
+    }
+
+    /// Take the prompt's message (and its attachments) to send once the open
+    /// chat's compaction is over. It is in the prompt history from now on,
+    /// as a sent one is.
+    pub(crate) fn hold_for_compaction(&mut self, queue: bool) {
+        let text = self.composer.take();
+        let attachments = std::mem::take(&mut self.attachments);
+        self.save_prompt_history();
+        self.held.push(Held {
+            thread: self.thread.id,
+            text,
+            attachments,
+            queue,
+        });
+    }
+
+    /// The open chat's messages waiting for its compaction, oldest first.
+    pub(crate) fn held_messages(&self) -> Vec<&str> {
+        self.held
+            .iter()
+            .filter(|held| held.thread == self.thread.id)
+            .map(|held| held.text.as_str())
+            .collect()
+    }
+
+    /// Send the open chat's waiting messages, in order, once nothing is
+    /// compacting it: each as Enter would send it now.
+    pub(crate) async fn release_held(&mut self, client: &ApiClient) {
+        while !self.mention_resources.sending && self.compacting_since().is_none() {
+            let Some(index) = self
+                .held
+                .iter()
+                .position(|held| held.thread == self.thread.id)
+            else {
+                return;
+            };
+            let held = self.held.remove(index);
+            if !self.send_held(held, client).await {
+                return;
+            }
+        }
+    }
+
+    /// Send `held` as Enter does: queued, steering a turn that runs, or as a
+    /// turn of its own. What does not go out comes back to the prompt, ahead
+    /// of whatever is typed there now, so nothing is lost.
+    async fn send_held(&mut self, held: Held, client: &ApiClient) -> bool {
+        let own = std::mem::replace(&mut self.attachments, held.attachments.clone());
+        let delivery = if held.queue {
+            Ok(haarness_protocol::InputDelivery::Queue)
+        } else {
+            client.input_delivery().await
+        };
+        let sent = match delivery {
+            Ok(delivery) => {
+                self.input_delivery = Some(delivery);
+                if delivery == haarness_protocol::InputDelivery::Queue {
+                    self.defer_prompt(held.text.clone(), client).await
+                } else if self.active_turn.is_some() {
+                    self.queue_prompt(held.text.clone(), client).await
+                } else {
+                    self.submit_prompt(held.text.clone(), client).await
+                }
+            }
+            Err(error) => Err(error),
+        };
+        if matches!(sent, Ok(true)) {
+            self.attachments = own;
+            return true;
+        }
+        let draft = self.composer.expanded_text();
+        if draft.trim().is_empty() {
+            self.composer.set_text(held.text);
+        } else {
+            self.composer.set_text(format!("{}\n\n{draft}", held.text));
+        }
+        self.attachments = held.attachments;
+        self.attachments.extend(own);
+        if let Err(error) = sent {
+            tracing::warn!(
+                error = format!("{error:#}"),
+                "a held message could not be sent"
+            );
+            self.show_compaction_error(format!("{error:#}"));
+        }
+        false
     }
 
     /// Take delivery of what the compaction requests answered.
@@ -168,10 +274,11 @@ impl App {
 }
 
 /// A proxy between this TUI and the server (a time limit on the way through
-/// Cloud) gave up on the request: the server itself never said no. Its own
-/// failures (a provider that failed the summary) always name their code.
+/// Cloud, Cloud's relay losing the computer's answer) gave up on the request:
+/// the server itself never said no. Its own failures (a provider that failed
+/// the summary) always name their own code.
 fn unanswered_by_gateway(error: &anyhow::Error) -> bool {
     crate::api::refusal_status(error)
         .is_some_and(|status| matches!(status.as_u16(), 502 | 504 | 524))
-        && crate::api::refusal_code(error).is_none()
+        && crate::api::refusal_code(error).is_none_or(|code| code == "bad_gateway")
 }
