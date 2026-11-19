@@ -71,7 +71,7 @@ import {
   serverKey,
   serverProjects,
 } from "../servers";
-import { freshChat, landItems, reduceEvent, type Live } from "./sync";
+import { freshChat, landItems, reduceEvent, replacedUndo, withoutUndone, type Live } from "./sync";
 import {
   archivedByReader,
   keptTabs,
@@ -2770,19 +2770,9 @@ function createApp(saved?: Preferences) {
     // A message sent after an undo replaces the undone turns, which the
     // server then drops: the open chat drops them too, at once, and reads
     // its history again, or they would show once the undo is over.
-    const undone =
-      envelope.type === "thread.updated" &&
-      envelope.threadId === state.selected &&
-      !(envelope.payload as Partial<T.Thread>).revert
-        ? state.threads.find((thread) => thread.id === envelope.threadId)?.revert
-        : undefined;
+    const undone = replacedUndo(envelope, state.threads, state.selected);
     const replaced = !!undone;
-    if (undone)
-      set("items", (items) =>
-        items.filter(
-          (entry) => entry.sequence <= undone.sequence || (!!envelope.turnId && entry.turnId === envelope.turnId),
-        ),
-      );
+    if (undone) set("items", (items) => withoutUndone(items, undone, envelope.turnId!));
     reduceEvent(state, set, item as T.EventEnvelope);
     // Goals pause, block and finish on their own; the TUI shows the message
     // in its status line, and Desktop beside the goal's chat composer.
