@@ -21156,6 +21156,7 @@ mod shell_reading_tests {
             "sudo rm x",
             "nohup rm x",
             "timeout 5 rm x",
+            "arch -x86_64 rm x",
             "command rm x",
             "/bin/rm x",
             "\\rm x",
@@ -21196,6 +21197,10 @@ mod shell_reading_tests {
         );
         assert_eq!(verdicts(&review, "timeout 5 cargo test"), Vec::new());
         assert_eq!(verdicts(&review, "git commit -m 'x'"), Vec::new());
+        // So does a remembered allow for a wrapper read since.
+        let mut remembered = review.clone();
+        remembered.approve_always("bash:arch -arm64 *");
+        assert_eq!(verdicts(&remembered, "arch -arm64 cargo test"), Vec::new());
         // A command also written on its own is judged as written.
         assert_eq!(
             verdicts(&review, "cargo test; timeout 5 cargo test"),
@@ -21269,6 +21274,16 @@ mod shell_reading_tests {
         std::fs::create_dir_all(project.join("src")).unwrap();
         std::fs::write(project.join(".env"), "TOKEN=x").unwrap();
         std::fs::write(project.join("src/main.rs"), "fn main() {}").unwrap();
+        std::fs::create_dir_all(project.join("deploy")).unwrap();
+        std::fs::write(project.join("deploy/Staging.ENV"), "TOKEN=x").unwrap();
+        std::fs::write(project.join("deploy/.env.local"), "TOKEN=x").unwrap();
+        // A workspace package linked into node_modules, as npm and pnpm do.
+        std::fs::create_dir_all(project.join("packages/api")).unwrap();
+        std::fs::create_dir_all(project.join("node_modules/@w")).unwrap();
+        std::fs::write(project.join("packages/api/.env"), "TOKEN=x").unwrap();
+        std::os::unix::fs::symlink("../../packages/api", project.join("node_modules/@w/api"))
+            .unwrap();
+        std::fs::write(project.join("src/Theme.Env.ts"), "export {}").unwrap();
         std::os::unix::fs::symlink(".env", project.join("notes.txt")).unwrap();
         // Haarness's defaults: shell commands run, `.env` reads ask.
         let defaults = engine(&[]);
@@ -21318,8 +21333,35 @@ mod shell_reading_tests {
             "cat .e*",
             "head -1 .?nv",
             "cat *",
+            // A file whose name ends in `.env` in another case.
+            "cat deploy/Staging.ENV",
+            "cd deploy && grep TOKEN Staging.ENV",
+            "cat deploy/S*",
+            "cat < deploy/Staging.ENV",
+            // A file that is there is judged where it really is: through a
+            // linked package, the package's own `.env`.
+            "cat node_modules/@w/api/.env",
+            // A search reads its files; a pattern an option gives leaves
+            // every operand a file, wherever the option stands.
+            "grep -r KEY .env",
+            "grep -e KEY .env",
+            "grep .env -e KEY src",
+            "grep -f .env src",
+            "rg KEY .env",
+            "rg -n KEY -- .env",
+            "grep -rn '.env' .env",
         ] {
             assert_eq!(verdict(&defaults, command), Ask, "{command}");
+        }
+        // `.ENV` is a file only where the disk ignores case, where it is
+        // `.env` itself; elsewhere it names nothing to read.
+        let folds = project.join(".ENV").is_file();
+        for command in ["cat .ENV", "grep TOKEN .Env", "cat deploy/.ENV.LOCAL"] {
+            assert_eq!(
+                verdict(&defaults, command),
+                if folds { Ask } else { Allow },
+                "{command}"
+            );
         }
         // Looking at it, an example file, a package's fixture, or writing
         // it reads nothing secret.
@@ -21346,6 +21388,8 @@ mod shell_reading_tests {
             "du -sh .*",
             "echo .*",
             "printf '%s\\n' .env*",
+            "cat .ENV.EXAMPLE",
+            "ls -la deploy/Staging.ENV",
         ] {
             assert_eq!(verdict(&defaults, command), Allow, "{command}");
         }
@@ -21370,6 +21414,57 @@ mod shell_reading_tests {
         // A blanket allow for every command is not one for this one.
         let blanket = engine(&[("bash:*", Allow)]);
         assert_eq!(verdict(&blanket, "cat .env"), Ask);
+        std::fs::remove_dir_all(&project).unwrap();
+    }
+
+    // POSIX shell text: Windows runs commands in cmd.exe.
+    #[cfg(unix)]
+    #[test]
+    fn names_in_code_and_source_files_read_no_secret() {
+        let project =
+            std::env::temp_dir().join(format!("haarness-code-names-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(project.join("src")).unwrap();
+        std::fs::write(project.join(".env"), "TOKEN=x").unwrap();
+        std::fs::write(project.join("src/Theme.Env.ts"), "export {}").unwrap();
+        std::fs::write(project.join("inspect.json"), "{}").unwrap();
+        let defaults = engine(&[]);
+        // A word in another case counts only when it names a file that is
+        // there, and only a name that ends in `.env`; `echo` prints names.
+        for command in [
+            "jq '.Config.Env' inspect.json",
+            "docker inspect web | jq '.[0].Config.Env'",
+            "grep -rn 'cfg.Env' --include=*.go .",
+            "rg -n 'cfg\\.Env' internal",
+            "grep -rn 'settings.ENV' .",
+            "grep -rn 'BuildConfig.ENV' app/src",
+            "grep -rn '{{ .Env.' .goreleaser.yaml",
+            "cat src/Theme.Env.ts",
+            "echo .ENV >> .gitignore",
+            // A search's pattern is no path, in any case.
+            "grep -rn '.Env' src",
+            "grep -rn '.ENV' src",
+            "grep -rn '.env' src",
+            "grep -rn \"process.env\" src",
+            "rg -n --hidden '.Env' .",
+            "rg '.ENV' .",
+            "git grep -n '.Env'",
+            "git -C src grep -n '.env' -- .",
+            "ag '.ENV' src",
+            "grep -rn --include=*.ts -A 2 '.Env' src",
+        ] {
+            let asked: Vec<PermissionDecision> =
+                ask_plans("bash", &json!({ "command": command }), &project)
+                    .into_iter()
+                    .flat_map(|plan| {
+                        plan.patterns
+                            .iter()
+                            .map(|pattern| plan.evaluate(&defaults, pattern).decision)
+                            .collect::<Vec<_>>()
+                    })
+                    .filter(|decision| *decision != PermissionDecision::Allow)
+                    .collect();
+            assert!(asked.is_empty(), "{command}: {asked:?}");
+        }
         std::fs::remove_dir_all(&project).unwrap();
     }
 
@@ -21544,12 +21639,14 @@ mod shell_reading_tests {
             assert!(asks(&engine, "cat .env").is_some());
             assert!(reads(&engine, ".env"));
         }
-        // A secret's name that is no file keeps what a remembered rule
-        // settled before: one Always on a search for `process.env`.
-        let card = asks(&in_project(&[]), "grep -rn process.env src").unwrap();
-        assert_eq!(card.remembered_rules(), ["bash:grep *"]);
-        for engine in answered(&[], "grep -rn process.env src") {
-            assert!(asks(&engine, "grep -rn import.meta.env src").is_none());
+        // A search's pattern names no file. A secret's name that is no file
+        // keeps what a remembered rule settled before: one Always on a
+        // search of history for `process.env`.
+        assert!(asks(&in_project(&[]), "grep -rn process.env src").is_none());
+        let card = asks(&in_project(&[]), "git log -S process.env").unwrap();
+        assert_eq!(card.remembered_rules(), ["bash:git log *"]);
+        for engine in answered(&[], "git log -S process.env") {
+            assert!(asks(&engine, "git log -S import.meta.env").is_none());
             assert!(asks(&engine, "grep TOKEN .env").is_some());
         }
         // A configured rule naming the command still settles a secret read;

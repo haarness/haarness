@@ -133,6 +133,25 @@ pub enum Naming {
     Printed,
 }
 
+/// What a command takes from a path it is given, for
+/// [`Reader::name_path`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Taken {
+    /// Nothing of what the file holds: it writes it, or only looks at it.
+    Unread,
+    /// What the file holds.
+    Read,
+    /// Its name, which `echo` or `printf` prints: a secret's name counts
+    /// only as written.
+    Name,
+}
+
+impl Taken {
+    fn by(reads: bool) -> Self {
+        if reads { Self::Read } else { Self::Unread }
+    }
+}
+
 /// A directory change in an `&&` chain: where it starts in the line, and
 /// where it leads as written (`raw`, value), or `None` when nobody can tell.
 pub type DirectoryChange = (usize, Option<(String, String)>);
@@ -258,6 +277,7 @@ fn cmd_word(raw: &str) -> String {
 /// starts its command in the user's home folder and `find -execdir` in
 /// each file's, so they are not among them.
 const KEEPS_FOLDER: &[&str] = &[
+    "arch",
     "builtin",
     "busybox",
     "caffeinate",
@@ -1766,7 +1786,7 @@ impl Reader<'_> {
                     &value,
                     complete,
                     outside.as_deref(),
-                    reads,
+                    Taken::by(reads),
                     reach.picks(),
                 );
                 if reads && complete {
@@ -2405,6 +2425,7 @@ impl Reader<'_> {
                 let options = Options::read(arguments, "tw", "", &[]);
                 self.invocation(options.rest, stdin, source, depth);
             }
+            "arch" => self.invocation(arch_command(arguments), stdin, source, depth),
             "xargs" => {
                 let options = Options::xargs(arguments);
                 // The command reads no input of the written command's.
@@ -2809,7 +2830,7 @@ impl Reader<'_> {
             value,
             complete,
             outside.as_deref(),
-            reads,
+            Taken::by(reads),
             reach.picks(),
         );
         if reads && complete {
@@ -2844,29 +2865,42 @@ impl Reader<'_> {
     /// Record a path a command is given or a redirect names when it leads
     /// outside the project (`outside`, the folder [`external_dir`] found),
     /// may name where Haarness keeps sign-ins, or is a secret file the
-    /// command `reads`: see [`BashAnalysis::paths`].
+    /// command reads (`taken`): see [`BashAnalysis::paths`].
     fn name_path(
         &mut self,
         raw: &str,
         value: &str,
         complete: bool,
         outside: Option<&Path>,
-        reads: bool,
+        taken: Taken,
         picked: bool,
     ) {
+        let reads = taken != Taken::Unread;
         // Every secret name holds `.env`; the test is cheap for the rest. A
         // link of another name (`notes.txt -> .env`) is judged by where it
         // leads. A glob counts by its text too (`*.env`), beside what it
         // reaches (see [`Self::name_glob_secrets`]): the shell may expand it
         // further than Haarness does (brace lists, `**`, options it sets).
+        // In another case (`.ENV`, `Prod.ENV`) only a file that is there
+        // counts, judged where it really is (on a disk that ignores case
+        // `.ENV` opens `.env`), so a name in code (`.Config.Env`) is none.
         let globbed = complete && unquoted_glob(raw);
         let named = complete
             && reads
             && value.contains(".env")
-            && crate::permissions::is_secret_path(Path::new(value));
+            && crate::permissions::is_secret_name(Path::new(value));
+        // One lookup before placing it: most such words name no file.
+        let cased = complete
+            && taken == Taken::Read
+            && !named
+            && holds_env(value)
+            && match home_expansion(raw, value) {
+                Some(expanded) => self.from().join(expanded).is_file(),
+                None => self.from().join(value).is_file(),
+            };
         let linked = complete && reads && !named && !globbed && is_link(self.from(), raw, value);
         let credential = complete && crate::permissions::may_name_credential_store(value);
-        if outside.is_none() && !named && !linked && !credential {
+        if outside.is_none() && !named && !cased && !linked && !credential {
             return;
         }
         let target = if complete {
@@ -2881,8 +2915,10 @@ impl Reader<'_> {
             Some(expanded) => resolve(self.from(), &expanded),
             None => resolve(self.from(), Path::new(target)),
         };
-        let secret =
-            (named || (linked && crate::permissions::is_secret_path(&path))) && !path.is_dir();
+        let secret = !path.is_dir()
+            && (named
+                || (linked && crate::permissions::is_secret_path(&path))
+                || (cased && crate::permissions::is_secret_path(&path)));
         if outside.is_none() && !secret && !credential {
             return;
         }
@@ -2976,10 +3012,14 @@ impl Reader<'_> {
             }
         }
         for (candidate, link) in found {
-            // Its name says it is a secret, or it may be a link to one.
-            let named = candidate.to_string_lossy().contains(".env")
-                && crate::permissions::is_secret_path(&candidate);
-            if !named && link == Some(false) {
+            // Its name says it is a secret, or it may be a link to one; a
+            // name in another case only once it is looked at (see
+            // [`Self::name_path`]).
+            let text = candidate.to_string_lossy();
+            let named = text.contains(".env") && crate::permissions::is_secret_name(&candidate);
+            let cased =
+                !named && holds_env(&text) && crate::permissions::is_secret_path(&candidate);
+            if !named && !cased && link == Some(false) {
                 continue;
             }
             if self.glob_looks == 0 {
@@ -2989,7 +3029,7 @@ impl Reader<'_> {
                 continue;
             }
             self.glob_looks -= 1;
-            if !named && !candidate.is_symlink() {
+            if !named && !cased && !candidate.is_symlink() {
                 continue;
             }
             let path = resolve(Path::new("/"), &candidate);
@@ -3240,32 +3280,9 @@ impl Reader<'_> {
             }
             // `sed -i` rewrites its files in place.
             "sed" | "gsed" => {
-                let in_place = long("--in-place") || short('i');
-                let scripted = arguments.iter().any(|word| {
-                    matches!(word.value.as_str(), "-e" | "--expression" | "-f" | "--file")
-                        || word.value.starts_with("--expression=")
-                        || word.value.starts_with("--file=")
-                });
-                if in_place {
-                    // BSD `sed -i '' …` and `sed -i .bak …`: the word after a
-                    // bare `-i` is its backup suffix.
-                    let suffix = arguments.iter().enumerate().find_map(|(index, word)| {
-                        (word.value == "-i")
-                            .then(|| arguments.get(index + 1))
-                            .flatten()
-                            .filter(|next| next.value.is_empty() || next.value.starts_with('.'))
-                            .map(|next| next.node.id())
-                    });
-                    let files =
-                        operands(&["-e", "--expression", "-f", "--file", "-l", "--line-length"]);
-                    for word in files
-                        .into_iter()
-                        .filter(|word| Some(word.node.id()) != suffix)
-                        .skip(usize::from(!scripted))
-                    {
-                        for path in expanded(word, source) {
-                            record(word, &path, true);
-                        }
+                for word in sed_in_place(arguments).into_iter().flatten() {
+                    for path in expanded(word, source) {
+                        record(word, &path, true);
                     }
                 }
             }
@@ -3543,7 +3560,13 @@ impl Reader<'_> {
         // literal path (`jq . <data>/auth.json`), unless it only looks at
         // the file (`ls -l`, `stat`, `test -f`).
         if complete && !self.path_command(&name) && !LOOKS_ONLY.contains(&name.as_str()) {
-            for word in arguments {
+            let prints = matches!(name.as_str(), "echo" | "printf");
+            let pattern = search_pattern(&name, arguments);
+            for (index, word) in arguments.iter().enumerate() {
+                // A search's pattern is no path (`grep -rn '.Env' src`).
+                if Some(index) == pattern {
+                    continue;
+                }
                 let (value, complete) = path_literal(word.node, source);
                 // An option's value as well (`--files0-from=<file>`).
                 let value = match value.split_once('=') {
@@ -3551,10 +3574,11 @@ impl Reader<'_> {
                     _ => value,
                 };
                 let named_from = self.analysis.paths.len();
-                self.name_path(&word.raw, &value, complete, None, true, false);
+                let taken = if prints { Taken::Name } else { Taken::Read };
+                self.name_path(&word.raw, &value, complete, None, taken, false);
                 // `echo` and `printf` print the names they are given, and
                 // `du` sums the sizes of what a glob matches.
-                if matches!(name.as_str(), "echo" | "printf") {
+                if prints {
                     for named in self.analysis.paths.iter_mut().skip(named_from) {
                         named.naming = Naming::Printed;
                     }
@@ -3716,6 +3740,377 @@ fn later_stages(node: tree_sitter::Node<'_>) -> Option<std::ops::Range<usize>> {
 pub(crate) fn may_match_secret(part: &str) -> bool {
     let end = part.rsplit(['*', '?', ']']).next().unwrap_or(part);
     end.is_empty() || part.contains("env") || ".env".ends_with(end)
+}
+
+/// Whether `text` holds `.env` in any case, as the name of every secret
+/// file does (see [`crate::permissions::is_secret_path`]): the cheap test
+/// first.
+fn holds_env(text: &str) -> bool {
+    text.as_bytes()
+        .windows(4)
+        .any(|window| window.eq_ignore_ascii_case(b".env"))
+}
+
+/// The options of a search program, for [`search_pattern`]: short ones
+/// that take no value, take one (the rest of their cluster or the next
+/// word) or give the pattern, and long ones likewise, written in full.
+struct SearchOptions {
+    flags: &'static str,
+    valued: &'static str,
+    patterns: &'static str,
+    long_flags: &'static [&'static str],
+    long_valued: &'static [&'static str],
+    long_patterns: &'static [&'static str],
+}
+
+const GREP_OPTIONS: SearchOptions = SearchOptions {
+    flags: "EFGPHILRTUVZabchilnoqrsuvwxyzOSp0123456789",
+    valued: "ABCDdmX",
+    patterns: "ef",
+    long_flags: &[
+        "recursive",
+        "dereference-recursive",
+        "ignore-case",
+        "no-ignore-case",
+        "line-number",
+        "count",
+        "files-with-matches",
+        "files-without-match",
+        "only-matching",
+        "quiet",
+        "silent",
+        "no-messages",
+        "invert-match",
+        "word-regexp",
+        "line-regexp",
+        "extended-regexp",
+        "fixed-strings",
+        "basic-regexp",
+        "perl-regexp",
+        "with-filename",
+        "no-filename",
+        "null",
+        "null-data",
+        "text",
+        "byte-offset",
+        "initial-tab",
+        "line-buffered",
+        "color",
+        "colour",
+        "no-group-separator",
+    ],
+    long_valued: &[
+        "after-context",
+        "before-context",
+        "context",
+        "max-count",
+        "include",
+        "exclude",
+        "exclude-dir",
+        "exclude-from",
+        "label",
+        "binary-files",
+        "devices",
+        "directories",
+        "group-separator",
+    ],
+    long_patterns: &["regexp", "file"],
+};
+
+const RG_OPTIONS: SearchOptions = SearchOptions {
+    flags: "abcFHhIiLlNnoPpqSsUuVvwxz0.",
+    valued: "ABCEMTdgjmrt",
+    patterns: "ef",
+    long_flags: &[
+        "hidden",
+        "no-ignore",
+        "no-ignore-vcs",
+        "no-ignore-parent",
+        "no-ignore-dot",
+        "no-ignore-global",
+        "no-ignore-exclude",
+        "no-config",
+        "ignore-case",
+        "smart-case",
+        "case-sensitive",
+        "fixed-strings",
+        "word-regexp",
+        "line-regexp",
+        "invert-match",
+        "count",
+        "count-matches",
+        "files-with-matches",
+        "files-without-match",
+        "line-number",
+        "no-line-number",
+        "column",
+        "heading",
+        "no-heading",
+        "with-filename",
+        "no-filename",
+        "only-matching",
+        "follow",
+        "text",
+        "multiline",
+        "multiline-dotall",
+        "pcre2",
+        "json",
+        "vimgrep",
+        "unrestricted",
+        "sort-files",
+        "null",
+        "null-data",
+        "trim",
+        "pretty",
+        "quiet",
+        "stats",
+        "no-messages",
+        "search-zip",
+        "crlf",
+        "binary",
+        "passthru",
+        "one-file-system",
+        "byte-offset",
+        "line-buffered",
+        "block-buffered",
+    ],
+    long_valued: &[
+        "glob",
+        "iglob",
+        "type",
+        "type-not",
+        "type-add",
+        "type-clear",
+        "max-count",
+        "max-depth",
+        "max-filesize",
+        "max-columns",
+        "after-context",
+        "before-context",
+        "context",
+        "context-separator",
+        "color",
+        "colors",
+        "encoding",
+        "engine",
+        "replace",
+        "sort",
+        "sortr",
+        "threads",
+        "path-separator",
+        "ignore-file",
+        "pre",
+        "pre-glob",
+    ],
+    // `--files` and `--type-list` search no text.
+    long_patterns: &["regexp", "file", "files", "type-list"],
+};
+
+const AG_OPTIONS: SearchOptions = SearchOptions {
+    flags: "acDfFiLlnoQsStuUvwz0",
+    valued: "ABCGmp",
+    // `ag -g` lists the files whose names match: there is no pattern.
+    patterns: "g",
+    long_flags: &[
+        "hidden",
+        "all-types",
+        "all-text",
+        "ignore-case",
+        "case-sensitive",
+        "smart-case",
+        "literal",
+        "fixed-strings",
+        "word-regexp",
+        "invert-match",
+        "files-with-matches",
+        "files-without-matches",
+        "count",
+        "follow",
+        "unrestricted",
+        "skip-vcs-ignores",
+        "search-zip",
+        "column",
+        "nocolor",
+        "noheading",
+        "nofilename",
+        "nobreak",
+        "nonumbers",
+        "only-matching",
+        "null",
+        "vimgrep",
+        "silent",
+        "stats",
+    ],
+    long_valued: &[
+        "after",
+        "before",
+        "depth",
+        "max-count",
+        "ignore",
+        "ignore-dir",
+        "path-to-ignore",
+        "file-search-regex",
+    ],
+    long_patterns: &[],
+};
+
+const GIT_GREP_OPTIONS: SearchOptions = SearchOptions {
+    flags: "acEFGHhIiLlnopqrvWwz0123456789",
+    valued: "ABCm",
+    patterns: "ef",
+    long_flags: &[
+        "cached",
+        "untracked",
+        "no-index",
+        "exclude-standard",
+        "no-exclude-standard",
+        "recurse-submodules",
+        "text",
+        "textconv",
+        "no-textconv",
+        "ignore-case",
+        "word-regexp",
+        "invert-match",
+        "full-name",
+        "extended-regexp",
+        "basic-regexp",
+        "perl-regexp",
+        "fixed-strings",
+        "line-number",
+        "column",
+        "files-with-matches",
+        "name-only",
+        "files-without-match",
+        "null",
+        "only-matching",
+        "count",
+        "color",
+        "no-color",
+        "break",
+        "heading",
+        "show-function",
+        "function-context",
+        "quiet",
+        "recursive",
+        "no-recursive",
+    ],
+    long_valued: &[
+        "max-depth",
+        "threads",
+        "after-context",
+        "before-context",
+        "context",
+        "max-count",
+    ],
+    long_patterns: &[],
+};
+
+/// Where the pattern of a search stands among its `arguments`: `grep`,
+/// `egrep`, `fgrep`, `rg`, `ag` and `git grep` take their first operand as
+/// the pattern unless an option gives one (`-e`, `-f`, `--regexp`), and a
+/// pattern is no path to read. Only when every option before and after it
+/// is one Haarness knows, and only a literal word no glob expands, so a
+/// file operand is never taken for the pattern.
+fn search_pattern(name: &str, arguments: &[Word<'_>]) -> Option<usize> {
+    let (start, options) = match name {
+        "grep" | "egrep" | "fgrep" => (0, &GREP_OPTIONS),
+        "rg" => (0, &RG_OPTIONS),
+        "ag" => (0, &AG_OPTIONS),
+        "git" => (git_grep_at(arguments)? + 1, &GIT_GREP_OPTIONS),
+        _ => return None,
+    };
+    // The words an option at `index` takes, past its own; `None` when it
+    // is not known or gives the pattern.
+    let takes = |word: &Word<'_>, next: Option<&Word<'_>>| -> Option<usize> {
+        if !word.literal {
+            return None;
+        }
+        if let Some(long) = word.value.strip_prefix("--") {
+            let (name, attached) = long
+                .split_once('=')
+                .map_or((long, false), |(name, _)| (name, true));
+            if options.long_valued.contains(&name) {
+                return Some(usize::from(!attached && next.is_some()));
+            }
+            return (options.long_flags.contains(&name) && !options.long_patterns.contains(&name))
+                .then_some(0);
+        }
+        for (at, letter) in word.value.char_indices().skip(1) {
+            if options.valued.contains(letter) {
+                let attached = !word.value[at + letter.len_utf8()..].is_empty();
+                return Some(usize::from(!attached && next.is_some()));
+            }
+            if options.patterns.contains(letter) || !options.flags.contains(letter) {
+                return None;
+            }
+        }
+        Some(0)
+    };
+    let mut index = start;
+    let pattern = loop {
+        let word = arguments.get(index)?;
+        if word.literal && word.value == "--" {
+            break index + 1;
+        }
+        if !word.value.starts_with('-') || word.value == "-" {
+            break index;
+        }
+        index += 1 + takes(word, arguments.get(index + 1))?;
+    };
+    let word = arguments.get(pattern)?;
+    if !word.literal || unquoted_glob(&word.raw) {
+        return None;
+    }
+    // GNU programs read options after their operands too (`grep x f -e y`).
+    if pattern > index {
+        return Some(pattern);
+    }
+    let mut index = pattern + 1;
+    while let Some(word) = arguments.get(index) {
+        if word.literal && word.value == "--" {
+            break;
+        }
+        index += 1;
+        if word.value.starts_with('-') && word.value != "-" {
+            index += takes(word, arguments.get(index))?;
+        }
+    }
+    Some(pattern)
+}
+
+/// Where `grep` stands among `git`'s words, after options of git's own that
+/// Haarness knows (`git -C x grep …`, `git --no-pager grep …`).
+fn git_grep_at(arguments: &[Word<'_>]) -> Option<usize> {
+    let mut index = 0;
+    loop {
+        let word = arguments.get(index)?;
+        if !word.literal {
+            return None;
+        }
+        match word.value.as_str() {
+            "grep" => return Some(index),
+            "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace" => index += 2,
+            "--no-pager"
+            | "-P"
+            | "-p"
+            | "--paginate"
+            | "--bare"
+            | "--no-replace-objects"
+            | "--literal-pathspecs"
+            | "--glob-pathspecs"
+            | "--noglob-pathspecs"
+            | "--icase-pathspecs"
+            | "--no-optional-locks" => index += 1,
+            value
+                if ["--git-dir=", "--work-tree=", "--namespace="]
+                    .iter()
+                    .any(|prefix| value.starts_with(prefix)) =>
+            {
+                index += 1;
+            }
+            _ => return None,
+        }
+    }
 }
 
 /// Whether a word as written holds a glob the shell expands: `*`, `?` or
@@ -4057,7 +4452,8 @@ fn given_paths(given: &Given<'_, '_>, source: &str) -> Vec<Path_> {
 /// The `GIT_WORK_TREE` values `command` (a command node) sets, by where each
 /// starts: an assignment before its program (`GIT_WORK_TREE=x git …`, also
 /// before a wrapper), and a word `env` or `sudo` sets (`env GIT_WORK_TREE=x
-/// git …`). An empty one sets none.
+/// git …`), or `arch` in its `-e=` (`arch -e=GIT_WORK_TREE=x git …`). An
+/// empty one sets none.
 fn work_tree_settings(command: tree_sitter::Node<'_>, source: &str) -> Vec<(usize, Path_)> {
     const NAME: &str = "GIT_WORK_TREE";
     let mut found = Vec::new();
@@ -4081,6 +4477,8 @@ fn work_tree_settings(command: tree_sitter::Node<'_>, source: &str) -> Vec<(usiz
             let (value, literal) = unquote(child, source);
             // Read as an option's value: `~` there is a name.
             value
+                .strip_prefix("-e=")
+                .unwrap_or(&value)
                 .strip_prefix(NAME)
                 .and_then(|rest| rest.strip_prefix('='))
                 .map(|tree| Path_ {
@@ -4101,8 +4499,9 @@ fn work_tree_settings(command: tree_sitter::Node<'_>, source: &str) -> Vec<(usiz
 /// Whether `node` (with its `parent`) sets `GIT_WORK_TREE` to a value: an
 /// assignment (before a command, on its own, or made by `export`, `declare`,
 /// `local` or `readonly`), `export GIT_WORK_TREE` of a value set elsewhere, a
-/// word a command such as `env` or `sudo` is given (`GIT_WORK_TREE=x`) or
-/// `export` is, quoted or not (`export "GIT_WORK_TREE=x"`), or
+/// word a command such as `env` or `sudo` is given (`GIT_WORK_TREE=x`, or
+/// `arch`'s `-e=GIT_WORK_TREE=x`) or `export` is, quoted or not (`export
+/// "GIT_WORK_TREE=x"`), or
 /// `${GIT_WORK_TREE:=x}`. An empty value sets none (git refuses it), and
 /// reading it (`"$GIT_WORK_TREE"`) or `unset` sets nothing.
 fn sets_work_tree(
@@ -4134,10 +4533,19 @@ fn sets_work_tree(
             && parent.is_some_and(|parent| {
                 matches!(parent.kind(), "command" | "declaration_command")
             })
-            && text(node).trim_start_matches(['"', '\'']).starts_with(NAME) =>
+            && {
+                let quoted = ['"', '\''];
+                let text = text(node).trim_start_matches(quoted);
+                text.strip_prefix("-e=")
+                    .unwrap_or(text)
+                    .trim_start_matches(quoted)
+                    .starts_with(NAME)
+            } =>
         {
             let (value, literal) = unquote(node, source);
             value
+                .strip_prefix("-e=")
+                .unwrap_or(&value)
                 .strip_prefix(NAME)
                 .and_then(|rest| rest.strip_prefix('='))
                 .is_some_and(|rest| !(literal && rest.is_empty()))
@@ -4728,6 +5136,130 @@ fn program_name(value: &str) -> String {
         Some(stem) => stem.to_owned(),
         None => name,
     }
+}
+
+/// The files `sed` rewrites in place, when it does (`-i`, BSD's `-I`,
+/// `--in-place`): its operands after the script, its options read as its
+/// getopt reads them. A cluster of short options ends at its first letter
+/// that takes a value, which is the rest of the cluster or else the next
+/// word: `-e` a script and `-f` a script file (so `-es/f/g/` is a script
+/// and `-ne's/a/b/p'` holds one), `-i` and `-I` a backup suffix (`-ie` is
+/// `-i` with the suffix `e`; the next word only as BSD's `sed -i ''` and
+/// `sed -i .bak` give it, empty or a name with a leading `.` and no `/`,
+/// which may also be GNU's file),
+/// and GNU's `-l` a line length (a number; BSD's
+/// `-l` takes none). A long option may be shortened as getopt allows
+/// (`--expr=…`, `--fi prog`, `--in-place`'s `--in`). Without `-e` or `-f`
+/// the first operand is the script.
+fn sed_in_place<'s, 't>(arguments: &'s [Word<'t>]) -> Option<Vec<&'s Word<'t>>> {
+    let number = |word: Option<&Word<'_>>| {
+        word.is_some_and(|word| {
+            !word.value.is_empty() && word.value.bytes().all(|byte| byte.is_ascii_digit())
+        })
+    };
+    let mut in_place = false;
+    let mut scripted = false;
+    let mut ended = false;
+    let mut operands = Vec::new();
+    // A `.bak`-like word after a bare `-i`: BSD's suffix, or GNU's file in
+    // the folder sed runs in (`sed -e … -i .zshrc`), so it counts as a file
+    // too.
+    let mut suffixes = Vec::new();
+    let mut index = 0;
+    while let Some(word) = arguments.get(index) {
+        index += 1;
+        let value = word.value.as_str();
+        if ended || !value.starts_with('-') {
+            // `find -exec sed -i … {} +` names what find found.
+            if value != "{}" {
+                operands.push(word);
+            }
+            continue;
+        }
+        if ends_options(word) {
+            ended = true;
+            continue;
+        }
+        if let Some(long) = value.strip_prefix("--") {
+            let (name, attached) = long
+                .split_once('=')
+                .map_or((long, false), |(name, _)| (name, true));
+            let names =
+                |option: &str, shortest: usize| name.len() >= shortest && option.starts_with(name);
+            // `--f` may also be `--follow-symlinks`.
+            if names("expression", 1) || names("file", 2) {
+                scripted = true;
+                index += usize::from(!attached);
+            } else if names("in-place", 1) {
+                in_place = true;
+            } else if names("line-length", 1) {
+                index += usize::from(!attached);
+            }
+            continue;
+        }
+        for (at, letter) in value.char_indices().skip(1) {
+            let rest = &value[at + letter.len_utf8()..];
+            match letter {
+                'e' | 'f' => {
+                    scripted = true;
+                    index += usize::from(rest.is_empty());
+                }
+                'i' | 'I' => {
+                    in_place = true;
+                    // GNU sed takes options anywhere (`sed -e … -i file`):
+                    // a path after `-i` is a file, not BSD's suffix.
+                    let next = arguments.get(index);
+                    if rest.is_empty()
+                        && let Some(next) = next.filter(|next| {
+                            next.value.is_empty()
+                                || (next.value.starts_with('.') && !next.value.contains('/'))
+                        })
+                    {
+                        if !next.value.is_empty() {
+                            suffixes.push(next);
+                        }
+                        index += 1;
+                    }
+                }
+                'l' if rest.is_empty() && number(arguments.get(index)) => index += 1,
+                'l' if !rest.is_empty() && rest.bytes().all(|byte| byte.is_ascii_digit()) => {}
+                _ => continue,
+            }
+            break;
+        }
+    }
+    in_place.then(|| {
+        operands
+            .into_iter()
+            .skip(usize::from(!scripted))
+            .chain(suffixes)
+            .collect()
+    })
+}
+
+/// The command macOS `arch` runs: the words after its own options, which
+/// it reads one word at a time rather than as getopt does. `-arch`, `-d`
+/// and `-e` take the next word (an architecture, a variable to unset, one
+/// to set) unless it is written in theirs (`-e=A=1`); `-c` clears the
+/// environment and any other names an architecture (`-arm64`, `-x86_64`,
+/// `-32`). A word with an expansion is one too (`-$(uname -m)`): `arch`
+/// refuses an option it does not know, so the program is never one. `-h`
+/// prints its usage and runs nothing, as `arch` alone does (it prints the
+/// machine's architecture).
+fn arch_command<'s, 't>(arguments: &'s [Word<'t>]) -> &'s [Word<'t>] {
+    let mut index = 0;
+    while let Some(word) = arguments.get(index) {
+        if !word.value.starts_with('-') {
+            break;
+        }
+        index += 1;
+        match word.value.as_str() {
+            "-h" => return &[],
+            "-arch" | "-d" | "-e" => index += 1,
+            _ => {}
+        }
+    }
+    &arguments[index.min(arguments.len())..]
 }
 
 /// A wrapper's long options that take a value, as getopt reads them.
@@ -8880,6 +9412,7 @@ mod regression {
             "cd sub && time cat ../README.md",
             "cd sub && timeout 5 nice cat ../README.md | head",
             "cd sub && env A=1 cat ../README.md",
+            "cd sub && arch -arm64 cat ../README.md",
             "cd sub && ls | xargs cat ../README.md",
             "cd a/l && cat ../../../README.md | head",
         ] {
@@ -8900,6 +9433,7 @@ mod regression {
             "cd sub && cat x | head > ../../out.txt",
             "cd sub && echo \"$(cat ../../x)\"",
             "cd sub && sudo cat ../../x",
+            "cd sub && arch -x86_64 cat ../../x",
             "cd sub && cat ../README.md | head && cat ../../x",
             "cd a/l && cat ../../../../x | head",
         ] {
@@ -9707,6 +10241,12 @@ mod readings {
             "stdbuf -oL rm x",
             "setsid rm x",
             "caffeinate -i rm x",
+            "arch -arm64 rm x",
+            "arch -x86_64 rm x",
+            "arch -arch arm64 rm x",
+            "arch -c -d HOME -e A=1 -arm64e rm x",
+            "/usr/bin/arch -32 rm x",
+            "arch rm x",
             "busybox rm x",
             "/bin/rm x",
             "\\rm x",
@@ -9770,6 +10310,9 @@ mod readings {
             "trap -l 'rm x' EXIT",
             "trap - 'rm x' EXIT",
             "trap 2 'rm x'",
+            "arch -h rm x",
+            "arch -arch rm x",
+            "arch -e rm x",
         ] {
             let readings = derived(command);
             assert!(
@@ -10877,6 +11420,8 @@ mod readings {
             "GIT_WORK_TREE=../outside/cache git clean -fdx",
             "env GIT_WORK_TREE=../outside/cache git clean -fdx",
             "sudo GIT_WORK_TREE=../outside/cache git clean -fdx",
+            "arch -arm64 -e GIT_WORK_TREE=../outside/cache git clean -fdx",
+            "arch -arm64 -e=GIT_WORK_TREE=../outside/cache git clean -fdx",
             "cd sub && git --work-tree=../../outside/cache clean -fdx",
             "bash -c 'GIT_WORK_TREE=../outside/cache git clean -fdx'",
         ] {
@@ -11082,6 +11627,71 @@ mod readings {
         ] {
             assert_eq!(found(&command), vec![placed(&file_text)], "{command}");
         }
+        // sed's script is read however it is given, so the file after it is
+        // never taken for it: written against `-e` or `-f`, at the end of a
+        // cluster, through a shortened long option, after a line length.
+        let file_path = file.display();
+        for options in [
+            "-i -e's/a/b/'",
+            "-i -es/a/b/",
+            "-i -ne's/a/b/p'",
+            "-ni -e's/a/b/'",
+            "-i -nEe's/a/b/'",
+            "-i --expr=s/a/b/",
+            "-i --e s/a/b/",
+            "-i -nf prog.sed",
+            "-i -fprog.sed",
+            "-i --fi=prog.sed",
+            "-i -l 80 -e 's/a/b/'",
+            "-i -l 80 's/a/b/'",
+            "-i -nl 80 's/a/b/'",
+            "-i -l80 's/a/b/'",
+            "-i --line 80 's/a/b/'",
+            // The f of a script, and a script after BSD's line-buffered -l.
+            "-i -es/f/g/",
+            "-i -l 's/a/b/'",
+            // `-ie` is `-i` with the backup suffix `e`; BSD's `-I` and a
+            // shortened `--in-place` rewrite too.
+            "-ie 's/a/b/'",
+            "-ni 's/a/b/p'",
+            "-I '' 's/a/b/'",
+            "--in-pl 's/a/b/'",
+        ] {
+            let command = format!("sed {options} {file_path}");
+            assert_eq!(found(&command), vec![placed(&file_text)], "{command}");
+        }
+        // An `i` in a script, or a script written against `-e`, is no
+        // `-i`.
+        for options in ["-es/a/i/", "-n -e's/i/b/p'", "-e 'i\\'", "--expr=i"] {
+            let command = format!("sed {options} {file_path}");
+            assert!(found(&command).is_empty(), "{command}");
+        }
+        // GNU sed takes `-i` anywhere: a path after it is a file, and only
+        // an empty word or a `.bak`-like name is BSD's suffix.
+        for command in [
+            "sed 's/a/b/' -i ../outside/cache/data.bin",
+            "sed -e 's/a/b/' -i ../outside/cache/data.bin",
+            "sed -i -e 's/a/b/' -i ../outside/cache/data.bin",
+            "sed -i .orig -e 's/a/b/' ../outside/cache/data.bin",
+            "sed -i '' 's/a/b/' ../outside/cache/data.bin",
+        ] {
+            assert_eq!(found(command), vec![placed(&file_text)], "{command}");
+        }
+        // A `.bak`-like word after a bare `-i` may be GNU's file in the
+        // folder sed runs in.
+        let settings = outside_real.join("cache").join(".settings");
+        std::fs::write(&settings, "x").unwrap();
+        for command in [
+            "cd ../outside/cache && sed -e 's/a/b/' -i .settings",
+            "cd ../outside/cache && sed -i .settings 's/a/b/' notes.txt",
+        ] {
+            assert_eq!(
+                found(command),
+                vec![placed(&settings.display().to_string())],
+                "{command}"
+            );
+        }
+        std::fs::remove_file(&settings).unwrap();
         for command in [
             format!("cp new.bin {out}/cache/"),
             format!("cp -t {out}/cache new.bin"),
@@ -11167,8 +11777,20 @@ mod readings {
             format!("stdbuf -o0 rm -rf {out}/cache"),
             format!("caffeinate -i rm -rf {out}/cache"),
             format!("nice -n 5 rm -rf {out}/cache"),
+            format!("arch -arm64 rm -rf {out}/cache"),
+            format!("arch -c -e A=1 -arch arm64 sh -c 'rm -rf {out}/cache'"),
+            format!("arch -d HOME -x86_64 rm -rf {out}/cache"),
+            format!("arch -$(uname -m) rm -rf {out}/cache"),
         ] {
             assert_eq!(found(&command), vec![placed(&cache)], "{command}");
+        }
+        // An `arch` option with an expansion is still an option: what
+        // follows is its program, not operands of one nobody can name.
+        for command in [
+            "arch -$(uname -m) cp build/app ~/haarness-nosuch/app",
+            "arch \"-$ARCH\" cp build/app ~/haarness-nosuch/app",
+        ] {
+            assert!(found(command).is_empty(), "{command}");
         }
         std::fs::remove_dir_all(root).unwrap();
     }
