@@ -5248,6 +5248,68 @@ async fn structured_output_in_the_wrong_shape_is_asked_for_again() {
     assert_eq!(rounds, 3);
 }
 
+#[tokio::test]
+async fn structured_output_with_values_written_as_strings_is_read_without_asking_again() {
+    let rounds = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let runtime = AgentRuntime::new(
+        Arc::new(SqliteStore::in_memory().unwrap()),
+        Arc::new(StaticProviderRegistry::new(vec![
+            Arc::new(ScriptedStructured {
+                rounds: rounds.clone(),
+                answers: vec![ProviderEvent::StructuredOutput(
+                    serde_json::json!({"count": "3", "tags": "bug", "done": "false"}),
+                )],
+            }) as Arc<dyn ModelProvider>,
+        ])),
+        Arc::new(EmptyToolRegistry),
+        EventBus::new(256),
+    );
+    let thread = runtime
+        .create_thread(CreateThreadRequest {
+            title: Some("Structured".into()),
+            provider: Some("scripted".into()),
+            model: Some("scripted-1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let schema = serde_json::json!({
+        "type": "object",
+        "properties": {
+            "count": {"type": "integer"},
+            "tags": {"type": "array", "items": {"type": "string"}},
+            "done": {"type": "boolean"}
+        },
+        "required": ["count", "tags", "done"],
+        "additionalProperties": false
+    });
+    let turn = runtime
+        .start_workflow_agent_turn(thread.id, thread.id, turn_request("count"), Some(schema))
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_done(&runtime, &turn).await.status,
+        TurnStatus::Completed
+    );
+    assert_eq!(rounds.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let items = runtime.items(thread.id, None).await.unwrap();
+    assert!(!items.iter().any(|item| matches!(
+        &item.data,
+        haarness_protocol::ItemData::UserMessage {
+            synthetic: true,
+            ..
+        }
+    )));
+    assert!(
+        items.iter().any(|item| matches!(
+            &item.data,
+            haarness_protocol::ItemData::AssistantMessage { text, .. }
+                if text == r#"{"count":3,"tags":["bug"],"done":false}"#
+        )),
+        "{items:?}"
+    );
+}
+
 /// Answers each round with its own events, keeping every request.
 struct ScriptedRounds {
     requests: Arc<std::sync::Mutex<Vec<ProviderRequest>>>,

@@ -13090,6 +13090,18 @@ impl RunnerTask {
                     if structured_output.is_some() && !calls.is_empty() {
                         structured_output = None;
                     }
+                    // Values written as strings (`"count": "3"`) and one item
+                    // written bare for a list read as a tool call's do,
+                    // rather than costing a round to ask again.
+                    if let Some(value) = structured_output.as_mut()
+                        && let Some(coerced) = crate::tool_validation::coerced_arguments(
+                            &crate::structured_output_tool(schema),
+                            value,
+                        )
+                    {
+                        tracing::info!(thread = %self.thread.id, "reading structured output values a model wrote as strings as the schema's types");
+                        *value = coerced;
+                    }
                     // Text beside tool calls narrates them: the calls run, as
                     // they would with final output beside them, and asking
                     // again before they ran would leave them unanswered.
@@ -14103,7 +14115,9 @@ impl RunnerTask {
     /// written as strings gets them as the tool's schema has them, before it
     /// is validated: Llama 3.1 sends `"timeout": "0"` and
     /// `"run_in_background": "false"`, and refused, sends them again the
-    /// same way and then makes up what the command printed.
+    /// same way and then makes up what the command printed. A list or an
+    /// object written as its JSON text, and one item written bare for a list
+    /// (`"queries": "browser"`), are read the same way.
     ///
     /// A call whose fields are named the way other coding agents' tools name
     /// them (`file_path`, `old_string`, `new_string`), or that adds a
@@ -14128,7 +14142,7 @@ impl RunnerTask {
                 .and_then(|tool| tool.coerced_arguments(arguments))
         };
         if let Some(coerced) = coerced {
-            tracing::info!(thread = %self.thread.id, tool = name, "reading scalars a model wrote as strings as the tool's types");
+            tracing::info!(thread = %self.thread.id, tool = name, "reading values a model wrote as strings as the tool's types");
             *arguments = coerced;
             return None;
         }

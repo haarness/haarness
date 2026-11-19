@@ -933,9 +933,10 @@ pub trait Tool: Send + Sync {
         definition.input_schema = self.validation_schema();
         crate::tool_validation::validate_listing(&definition, arguments, &listed)
     }
-    /// A model's arguments whose only faults are scalars written as strings
-    /// (`"timeout": "0"`), as the validation schema's types; `None` for any
-    /// other arguments (see `tool_validation::coerced_arguments`).
+    /// A model's arguments whose only faults are values written as strings
+    /// (`"timeout": "0"`, `"labels": "bug"` for a list), as the validation
+    /// schema's types; `None` for any other arguments (see
+    /// `tool_validation::coerced_arguments`).
     fn coerced_arguments(&self, arguments: &Value) -> Option<Value> {
         let mut definition = self.definition();
         definition.input_schema = self.validation_schema();

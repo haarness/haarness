@@ -167,7 +167,9 @@ tool-capable OpenAI-compatible providers. Claude models with adaptive thinking,
 directly or through a Haarness router, use Claude's native JSON output instead,
 because Opus 5.5, Sonnet 5.5 and Fable 5.1 refuse a forced tool choice. The captured value is serialized
 canonically and validated again after the turn before the workflow receives
-`result.data`. Ordinary agent turns and schema-free workflow agents keep their
+`result.data`. A value the model wrote as a string where the schema wants
+another type (`"count": "3"`, `"tags": "bug"` for a list) is read as that type
+first, as a tool call's arguments are, so it costs no second round. Ordinary agent turns and schema-free workflow agents keep their
 normal text/tool behavior.
 
 `@haarness-ai/plugin` is a runtime-provided compatibility module; workflows do
