@@ -570,9 +570,13 @@ fn coerced_once(
                         })
                     })
                     .or_else(|| {
-                        wanted
-                            .iter()
-                            .any(|kind| matches!(kind, JsonType::Array))
+                        // A number where the schema also takes numbers is
+                        // that number or nothing, never a list of it.
+                        let number = written_scalar(text).is_some_and(|value| value.is_number())
+                            && wanted
+                                .iter()
+                                .any(|kind| matches!(kind, JsonType::Number | JsonType::Integer));
+                        (!number && wanted.iter().any(|kind| matches!(kind, JsonType::Array)))
                             .then(|| written_item(text))
                             .flatten()
                     })
@@ -594,14 +598,20 @@ fn coerced_once(
                 // that several take is no telling which was meant. An
                 // alternative takes a value as it is or with the strings in
                 // it read as its own types (`["3"]` as a list of integers).
+                let scalar = written_scalar(text);
+                // A number where an alternative takes numbers is that number
+                // or nothing, never a list of it.
+                let item = if scalar.as_ref().is_some_and(Value::is_number)
+                    && alternatives.iter().any(takes_numbers)
+                {
+                    None
+                } else {
+                    written_item(text)
+                };
                 let mut chosen = None;
-                for value in [
-                    written_scalar(text),
-                    written_structure(text),
-                    written_item(text),
-                ]
-                .into_iter()
-                .flatten()
+                for value in [scalar, written_structure(text), item]
+                    .into_iter()
+                    .flatten()
                 {
                     let mut taken: Vec<Value> = validators
                         .iter()
@@ -888,13 +898,16 @@ fn written_scalar(text: &str) -> Option<Value> {
 /// than one item reads so: none with a space, a comma or a double quote in
 /// it, which could be several items or the JSON of one, none that opens a
 /// JSON array or object, which is a broken one, and no word that stands for
-/// no value or a boolean (`null`, `None`, `true`, `False`), which is no
-/// item. The list's own schema still decides whether it takes the item.
+/// no value or a boolean in some language (`null`, `None`, `nil`,
+/// `undefined`, `true`, `False`, in any case), which is no item. The list's
+/// own schema still decides whether it takes the item.
 fn written_item(text: &str) -> Option<Value> {
     let text = text.trim();
     if text.is_empty()
-        || text == "None"
-        || written_scalar(text).is_some_and(|value| !value.is_number())
+        || matches!(
+            text.to_ascii_lowercase().as_str(),
+            "null" | "none" | "nil" | "undefined" | "true" | "false"
+        )
         || text.starts_with(['[', '{'])
         || text
             .contains(|character: char| character.is_whitespace() || matches!(character, ',' | '"'))
@@ -902,6 +915,18 @@ fn written_item(text: &str) -> Option<Value> {
         return None;
     }
     Some(Value::Array(vec![Value::String(text.to_owned())]))
+}
+
+/// Whether `schema` names a number type (`"integer"` or `"number"`, alone
+/// or in a list of types).
+fn takes_numbers(schema: &Value) -> bool {
+    match schema.get("type") {
+        Some(Value::String(kind)) => matches!(kind.as_str(), "number" | "integer"),
+        Some(Value::Array(kinds)) => kinds
+            .iter()
+            .any(|kind| matches!(kind.as_str(), Some("number" | "integer"))),
+        _ => false,
+    }
 }
 
 fn argument_path(pointer: &str, arguments: &Value) -> String {
@@ -1283,10 +1308,15 @@ mod tests {
             "\"bug\"",
             "say \"hi\"",
             "None",
+            "none",
+            "NULL",
+            "nil",
+            "undefined",
             "true",
             "false",
             "True",
             "False",
+            "TRUE",
         ] {
             for key in ["labels", "assignees", "milestones"] {
                 assert_eq!(one(key, text), None, "{key}: {text:?}");
@@ -1631,17 +1661,30 @@ mod tests {
             coerced_arguments(&tool, &json!({"one": "src"})),
             Some(json!({"one": ["src"]}))
         );
-        // A number one alternative takes is that number, not a list of it.
+        // A number one alternative takes is that number, not a list of it;
+        // one the number alternative refuses is no list item either.
         let number_or_list = definition(json!({
             "type": "object",
-            "properties": {"n": {"anyOf": [
-                {"type": "integer"},
-                {"type": "array", "items": {"type": "string"}}
-            ]}},
+            "properties": {
+                "n": {"anyOf": [
+                    {"type": "integer", "minimum": 1},
+                    {"type": "array", "items": {"type": "string"}}
+                ]},
+                "m": {"type": ["integer", "array"], "items": {"type": "string"}},
+            },
         }));
         assert_eq!(
             coerced_arguments(&number_or_list, &json!({"n": "3"})),
             Some(json!({"n": 3}))
+        );
+        assert_eq!(coerced_arguments(&number_or_list, &json!({"n": "0"})), None);
+        assert_eq!(
+            coerced_arguments(&number_or_list, &json!({"m": "1.5"})),
+            None
+        );
+        assert_eq!(
+            coerced_arguments(&number_or_list, &json!({"n": "src"})),
+            Some(json!({"n": ["src"]}))
         );
         // Two do: no telling which was meant.
         assert_eq!(coerced_arguments(&tool, &json!({"either": "5"})), None);
