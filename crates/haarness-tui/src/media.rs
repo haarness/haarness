@@ -180,7 +180,7 @@ pub fn paths_from_paste(
         let mut media = Vec::new();
         let mut others = Vec::new();
         for word in shellish_words(trimmed) {
-            let Some(path) = decode_path(&word.text).filter(|path| path.is_file()) else {
+            let Some(path) = word_path(&word.text).filter(|path| path.is_file()) else {
                 return Ok(None);
             };
             if is_media(&path) {
@@ -347,6 +347,15 @@ fn decode_path(value: &str) -> Option<PathBuf> {
         return url::Url::parse(unquoted).ok()?.to_file_path().ok();
     }
     Some(PathBuf::from(unescape(unquoted)))
+}
+
+/// The file a word of a drop names. Its quotes and escapes were read with
+/// the word, so a backslash left in it is part of the name.
+fn word_path(text: &str) -> Option<PathBuf> {
+    if text.starts_with("file://") {
+        return url::Url::parse(text).ok()?.to_file_path().ok();
+    }
+    Some(PathBuf::from(text))
 }
 
 /// Whether a backslash escapes the next character in a dropped path. On
@@ -669,6 +678,33 @@ mod tests {
             paths_from_paste(&nine, &[], Language::English, false),
             Err("Attach at most 8 files at once".into())
         );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    /// A name holding a backslash, which a terminal writes as `\\`, keeps
+    /// it when it comes with other files: each word is unescaped once.
+    #[cfg(not(windows))]
+    #[test]
+    fn a_backslash_in_a_dropped_name_is_read_once() {
+        let root = std::env::temp_dir().join(format!("haarness-slash-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(&root).unwrap();
+        let odd = root.join("before\\after.png");
+        let shot = root.join("shot.png");
+        for file in [&odd, &shot] {
+            std::fs::write(file, b"png fixture").unwrap();
+        }
+        let escaped = odd.display().to_string().replace('\\', "\\\\");
+
+        for drop in [escaped.clone(), format!("{escaped} {}", shot.display())] {
+            assert_eq!(
+                paths_from_paste(&drop, &[], Language::English, false)
+                    .unwrap()
+                    .map(|dropped| dropped.media.first().cloned()),
+                Some(Some(canonical(&odd))),
+                "{drop}"
+            );
+        }
 
         let _ = std::fs::remove_dir_all(root);
     }
