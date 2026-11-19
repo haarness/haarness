@@ -393,6 +393,179 @@ test("a terminal whose connection went dead while the machine slept connects aga
   expect(errors).toEqual([]);
 });
 
+/** The text of each row on the terminal's screen, without trailing blanks. */
+const screen = () =>
+  rows()
+    .locator(":scope > div")
+    .evaluateAll((items) => items.map((item) => (item.textContent ?? "").trimEnd()));
+/** The rows that hold text. */
+const written = async () => (await screen()).filter(Boolean);
+/** Runs `command` and waits for the prompt after its output. */
+async function settle(command: string, last: string) {
+  await prompt();
+  await input().fill(command);
+  await input().press("Enter");
+  await expect(rows()).toContainText(last);
+  await expect.poll(async () => (await written()).at(-1)).toBe("query-shell$");
+}
+/** Hides the panel and shows it again: a new view, which replays the output. */
+async function showAgain() {
+  await page.getByRole("button", { name: "Hide terminal", exact: true }).click();
+  await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
+  await expect(input()).toBeFocused();
+}
+/** Right-clicks the terminal's blank corner; the labels of the menu main
+ * built, and `choose` clicked in it. Main records menus in tests instead of
+ * showing them (`haarnessContextMenus`). */
+async function terminalMenu(choose?: string) {
+  await app.evaluate(() => void ((globalThis as { haarnessContextMenus?: Electron.Menu[] }).haarnessContextMenus = []));
+  const box = (await page.locator(".terminal-view .xterm-screen").boundingBox())!;
+  await page.mouse.click(box.x + box.width - 20, box.y + box.height - 20, { button: "right" });
+  let labels: string[] = [];
+  await expect
+    .poll(async () => {
+      labels = await app.evaluate((_, choose) => {
+        const menu = (globalThis as { haarnessContextMenus?: Electron.Menu[] }).haarnessContextMenus?.at(-1);
+        if (choose) menu?.items.find((item) => item.label === choose)?.click();
+        return menu?.items.map((item) => (item.type === "separator" ? "-" : item.label)) ?? [];
+      }, choose);
+      return labels.length;
+    })
+    .toBeGreaterThan(0);
+  return labels;
+}
+
+test("Clear in the terminal's menu leaves only the prompt line, and a terminal shown again stays cleared", async () => {
+  if (!(await page.locator(".terminal-panel").count()))
+    await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
+  await settle("seq -f 'line %03g' 1 200", "line 200");
+  expect(await terminalMenu("Clear")).toEqual(["Paste", "-", "Clear"]);
+  // The prompt line is now the first, and nothing is left above it.
+  await expect.poll(screen).toEqual(["query-shell$", ...Array((await screen()).length - 1).fill("")]);
+  await page.locator(".terminal-view").hover();
+  await page.mouse.wheel(0, -2400);
+  await page.waitForTimeout(300);
+  expect(await written()).toEqual(["query-shell$"]);
+  // The shell goes on as before.
+  await settle("printf 'after-%s\\n' clear", "after-clear");
+  const after = await written();
+  expect(after).toEqual(["query-shell$ printf 'after-%s\\n' clear", "after-clear", "query-shell$"]);
+  // Shown again, the view replays the server's output, cleared lines and
+  // all, and clears itself where it was cleared.
+  await showAgain();
+  await expect.poll(written).toEqual(after);
+  await showAgain();
+  await expect.poll(written).toEqual(after);
+  // A full-screen program keeps its screen: its menu has no Clear.
+  await input().fill("seq -f 'page %03g' 1 300 | LESS= less");
+  await input().press("Enter");
+  await expect(rows()).toContainText("page 001");
+  expect(await terminalMenu()).toEqual(["Paste"]);
+  await input().focus();
+  await input().press("q");
+  await expect.poll(async () => (await written()).at(-1)).toBe("query-shell$");
+  expect(await written()).toEqual([...after.slice(0, -1), "query-shell$ seq -f 'page %03g' 1 300 | LESS= less", "query-shell$"]);
+  expect(errors).toEqual([]);
+});
+
+test("⌘K with the keyboard in the terminal clears it, does nothing under a full-screen program, and opens Search everywhere else", async () => {
+  test.skip(process.platform !== "darwin", "⌘K clears the terminal on macOS only");
+  // ⌘K as the window gets it from the system: main hears it first
+  // (before-input-event), which Playwright's own keys skip.
+  const commandK = () =>
+    app.evaluate(({ BrowserWindow }) => {
+      const contents = BrowserWindow.getAllWindows()[0].webContents;
+      contents.sendInputEvent({ type: "keyDown", keyCode: "K", modifiers: ["meta"] });
+      contents.sendInputEvent({ type: "keyUp", keyCode: "K", modifiers: ["meta"] });
+    });
+  // Where main thinks the keyboard is: in a terminal, or not.
+  const inTerminal = (inside: boolean) =>
+    expect
+      .poll(() => app.evaluate(() => (globalThis as unknown as { haarnessTerminalKeyboard: Set<number> }).haarnessTerminalKeyboard.size))
+      .toBe(inside ? 1 : 0);
+  // The ⌘K presses the page itself heard, and whether it held them back.
+  const heard = () =>
+    page.evaluate(() => {
+      const record = window as unknown as { heardKeys?: string[] };
+      if (!record.heardKeys) {
+        record.heardKeys = [];
+        document.addEventListener("keydown", (event) => {
+          if (event.metaKey && event.key.toLowerCase() === "k") record.heardKeys!.push(event.defaultPrevented ? "prevented" : "passed");
+        });
+      }
+      return record.heardKeys.splice(0);
+    });
+  await heard();
+  if (!(await page.locator(".terminal-panel").count()))
+    await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
+  await settle("seq -f 'line %03g' 1 200", "line 200");
+  // A word selected in the output goes with it.
+  const word = (await rows().locator(":scope > div").filter({ hasText: "line 190" }).last().boundingBox())!;
+  await page.mouse.dblclick(word.x + 12, word.y + word.height / 2);
+  const selection = page.locator(".terminal-view .xterm-selection div");
+  await expect(selection).not.toHaveCount(0);
+  await input().focus();
+  await inTerminal(true);
+  await commandK();
+  await expect.poll(written).toEqual(["query-shell$"]);
+  await expect(selection).toHaveCount(0);
+  // Main took the key: neither the page nor the menu's Search heard it.
+  expect(await heard()).toEqual([]);
+  await expect(page.locator(".palette-dialog")).toHaveCount(0);
+  await showAgain();
+  await expect.poll(written).toEqual(["query-shell$"]);
+
+  // Under less, ⌘K leaves its screen and the lines behind it alone.
+  await settle("printf 'before-%s\\n' less", "before-less");
+  const before = await written();
+  await input().fill("seq -f 'page %03g' 1 300 | LESS= less");
+  await input().press("Enter");
+  await expect(rows()).toContainText("page 001");
+  const paged = await screen();
+  await inTerminal(true);
+  await commandK();
+  await page.waitForTimeout(500);
+  expect(await screen()).toEqual(paged);
+  expect(await heard()).toEqual([]);
+  await expect(page.locator(".palette-dialog")).toHaveCount(0);
+  await input().press("q");
+  await expect.poll(async () => (await written()).at(-1)).toBe("query-shell$");
+  expect(await written()).toEqual([...before.slice(0, -1), "query-shell$ seq -f 'page %03g' 1 300 | LESS= less", "query-shell$"]);
+
+  // With the keyboard in the message box, ⌘K reaches the page untouched, so
+  // the menu runs Search (a system menu takes no synthetic key, so the test
+  // runs the menu item that carries the key), and the terminal keeps its lines.
+  const shown = await written();
+  await page.getByRole("textbox", { name: "Message", exact: true }).click();
+  await inTerminal(false);
+  await commandK();
+  await expect.poll(heard).toEqual(["passed"]);
+  expect(await written()).toEqual(shown);
+  const accelerator = await app.evaluate(({ BrowserWindow, Menu }) => {
+    const find = (items: Electron.MenuItem[]): Electron.MenuItem | undefined =>
+      items.reduce<Electron.MenuItem | undefined>(
+        (found, item) => found ?? (item.accelerator === "CmdOrCtrl+K" ? item : item.submenu && find(item.submenu.items)),
+        undefined,
+      );
+    const item = find(Menu.getApplicationMenu()?.items ?? []);
+    // The menu acts for the window in front, which a key pressed in it is;
+    // a test's window may not be.
+    const front = BrowserWindow.getFocusedWindow;
+    BrowserWindow.getFocusedWindow = () => BrowserWindow.getAllWindows()[0];
+    try {
+      item?.click();
+    } finally {
+      BrowserWindow.getFocusedWindow = front;
+    }
+    return item?.label;
+  });
+  expect(accelerator).toBe("Command palette");
+  await expect(page.locator(".palette-dialog")).toHaveCount(1);
+  await page.keyboard.press("Escape");
+  await expect(page.locator(".palette-dialog")).toHaveCount(0);
+  expect(errors).toEqual([]);
+});
+
 // Last: it replaces the server the other tests use.
 test("after the server is replaced, the terminal it no longer has gives way to one new shell in every window", async () => {
   test.setTimeout(240_000);

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { optionKeys } from "../src/renderer/terminal-keys";
+import { clearsTerminal, optionKeys } from "../src/renderer/terminal-keys";
 
 const press = (code: string, altKey = true) => ({ type: "keydown", code, altKey });
 const release = (code: string) => ({ type: "keyup", code, altKey: false });
@@ -37,4 +37,29 @@ test("an Option release missed in the background does not stick", () => {
   keys.meta(press("AltRight"), "left");
   keys.reset();
   assert.equal(keys.meta(press("KeyB"), "left"), true);
+});
+
+test("⌘K clears the terminal on macOS only, and no other chord does", () => {
+  const key = (init: Partial<Record<"metaKey" | "ctrlKey" | "altKey" | "shiftKey", boolean>>, name = "k", code = "KeyK") => ({
+    key: name,
+    code,
+    metaKey: false,
+    ctrlKey: false,
+    altKey: false,
+    shiftKey: false,
+    ...init,
+  });
+  assert.equal(clearsTerminal(key({ metaKey: true }), "darwin"), true);
+  // A layout whose K key writes another letter still has ⌘K there.
+  assert.equal(clearsTerminal(key({ metaKey: true }, "л"), "darwin"), true);
+  // Ctrl+K is the shell's (it cuts the line after the cursor); other chords
+  // with K are left to the shell and the menus.
+  for (const init of [{ ctrlKey: true }, { metaKey: true, shiftKey: true }, { metaKey: true, altKey: true }, { metaKey: true, ctrlKey: true }, {}])
+    assert.equal(clearsTerminal(key(init), "darwin"), false, JSON.stringify(init));
+  assert.equal(clearsTerminal(key({ metaKey: true }, "j", "KeyJ"), "darwin"), false);
+  // Off macOS no key clears it: the menu's Clear does.
+  for (const platform of ["linux", "win32"]) {
+    assert.equal(clearsTerminal(key({ ctrlKey: true }), platform), false);
+    assert.equal(clearsTerminal(key({ metaKey: true }), platform), false);
+  }
 });

@@ -38,6 +38,7 @@ import { terminalAnswers } from "./terminal-answers";
 import { translate } from "../localization";
 import { globalAccelerator, globalShortcutError, type GlobalShortcut } from "../global-shortcut";
 import { matchesShortcut, shortcutLabel } from "../renderer/search";
+import { clearsTerminal } from "../renderer/terminal-keys";
 import { cancelled, errorText, failureDetail, failureMessage } from "../renderer/error-text";
 /** Native dialogs speak the language chosen in Settings, like the menus do. */
 const say = (key: string) => translate(data().preferences.language, key);
@@ -207,6 +208,8 @@ const commandOwners = new Map<string, number>();
 const sideQuestions = new Map<string, { owner: number; abort: AbortController }>();
 /** Windows whose keyboard is in the side chat, where ⌘W closes its thread in front. */
 const sideChatKeyboard = new Set<number>();
+/** Windows whose keyboard is in a terminal, where ⌘K clears it on macOS. */
+const terminalKeyboard = new Set<number>();
 /** When each window last reloaded a page that stopped; one that stops again sooner asks. */
 const pageReloads = new Map<number, number>();
 const PAGE_RELOAD_EVERY_MS = 60_000;
@@ -238,7 +241,11 @@ const answerers = terminalAnswers();
 // and keep the outage going by refusing new ones while
 // `haarnessTerminalOutage` is set.
 if (process.env.HAARNESS_DESKTOP_TEST === "1")
-  Object.assign(globalThis, { haarnessTerminalSockets: terminals, haarnessTerminalOutage: false });
+  Object.assign(globalThis, {
+    haarnessTerminalSockets: terminals,
+    haarnessTerminalOutage: false,
+    haarnessTerminalKeyboard: terminalKeyboard,
+  });
 const terminalOutage = () =>
   process.env.HAARNESS_DESKTOP_TEST === "1" &&
   (globalThis as { haarnessTerminalOutage?: boolean }).haarnessTerminalOutage === true;
@@ -1451,6 +1458,10 @@ function installHandlers() {
     if (focused === true) sideChatKeyboard.add(win.id);
     else sideChatKeyboard.delete(win.id);
   });
+  handle("terminalFocus", (win, focused: unknown) => {
+    if (focused === true) terminalKeyboard.add(win.id);
+    else terminalKeyboard.delete(win.id);
+  });
   // A side question's answer arrives as "btw" events with the id the window
   // chose, and the call answers with the last of them (done or error), so the
   // window never depends on an event outrunning the reply. Cancelling that id
@@ -1850,11 +1861,18 @@ function installHandlers() {
   );
   handle("exportLogs", (win) => exportLogs(win, say));
   // The terminal's right-click menu (see Terminal.tsx), with the text
-  // selected there.
-  handle("terminalMenu", (win, raw: unknown) =>
+  // selected there. Clear goes back to the window, whose terminal clears.
+  handle("terminalMenu", (win, raw: unknown, clearable: unknown) =>
     showContextMenu(
       win,
-      terminalMenuItems(z.string().parse(raw), { t: say, copy: (text) => clipboard.writeText(text) }),
+      terminalMenuItems(z.string().parse(raw), {
+        t: say,
+        copy: (text) => clipboard.writeText(text),
+        platform: process.platform,
+        ...(clearable === false
+          ? {}
+          : { clear: () => send(win, { kind: "menu", data: "terminal-clear" }) }),
+      }),
     ),
   );
   // An image a reply links to on another host, once the person asks for it.
@@ -2113,6 +2131,7 @@ function createWindow() {
     // iframe that navigates (a preview, an MCP app) has not.
     if (!event.isMainFrame || event.isSameDocument) return;
     sideChatKeyboard.delete(win.id);
+    terminalKeyboard.delete(win.id);
     for (const side of sideQuestions.values())
       if (side.owner === win.id) side.abort.abort();
   });
@@ -2133,6 +2152,14 @@ function createWindow() {
     if (side && matchesShortcut(keys, side, process.platform)) {
       event.preventDefault();
       send(win, { kind: "menu", data: "side-chat" });
+      return;
+    }
+    // ⌘K with the keyboard in a terminal clears it, as in Terminal and
+    // iTerm2; neither the page nor the menu's Search hears it, and Search
+    // keeps it everywhere else.
+    if (terminalKeyboard.has(win.id) && clearsTerminal(keys, process.platform)) {
+      event.preventDefault();
+      send(win, { kind: "menu", data: "terminal-clear" });
       return;
     }
     // ⌘W (Ctrl+W elsewhere) closes the side chat's thread in front while the
@@ -2158,6 +2185,7 @@ function createWindow() {
     for (const side of sideQuestions.values())
       if (side.owner === win.id) side.abort.abort();
     sideChatKeyboard.delete(win.id);
+    terminalKeyboard.delete(win.id);
     pageReloads.delete(win.id);
     terminals.close(win.id);
     answerers.forget(win.id);

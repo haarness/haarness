@@ -1395,7 +1395,7 @@ test("a right-click offers what fits where it lands, nothing on the sidebar, and
     }
     await contextMenus(app);
 
-    // The terminal's own menu: Paste, and Copy for what is selected there.
+    // The terminal's own menu: Paste, Copy for what is selected there, and Clear.
     await page.getByRole("button", { name: "Toggle terminal", exact: true }).click();
     const shell = page.locator(".xterm-helper-textarea");
     await expect(shell).toBeFocused();
@@ -1403,7 +1403,7 @@ test("a right-click offers what fits where it lands, nothing on the sidebar, and
     const screen = (await page.locator(".xterm-screen").boundingBox())!;
     const blank = { x: screen.x + screen.width - 20, y: screen.y + screen.height - 20 };
     await page.mouse.click(blank.x, blank.y, { button: "right" });
-    await expect.poll(async () => (await contextMenus(app)).at(-1)).toEqual(["Paste"]);
+    await expect.poll(async () => (await contextMenus(app)).at(-1)).toEqual(["Paste", "-", "Clear"]);
     await shell.focus();
     await page.keyboard.type("printf 'menu%sproof\\n' -");
     await page.keyboard.press("Enter");
@@ -1412,7 +1412,7 @@ test("a right-click offers what fits where it lands, nothing on the sidebar, and
     const word = (await proof.boundingBox())!;
     await page.mouse.dblclick(word.x + 12, word.y + word.height / 2);
     await page.mouse.click(word.x + 12, word.y + word.height / 2, { button: "right" });
-    await expect.poll(async () => (await contextMenus(app)).at(-1)).toEqual(["Copy", "Paste"]);
+    await expect.poll(async () => (await contextMenus(app)).at(-1)).toEqual(["Copy", "Paste", "-", "Clear"]);
     const saved = await app.evaluate(({ clipboard }) => clipboard.readText());
     try {
       await page.mouse.click(word.x + 12, word.y + word.height / 2, { button: "right" });
