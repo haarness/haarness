@@ -168,7 +168,9 @@ impl AnthropicProvider {
                 .send()
                 .await
                 .ok()
-                .filter(|response| !crate::sse::unfollowed_listing(&self.id, response))
+                .filter(|response| {
+                    !crate::sse::unfollowed_listing(&self.id, response, Some("/models"))
+                })
                 .and_then(|response| response.error_for_status().ok())?;
             let Ok(body) = response.json::<Value>().await else {
                 return None;
@@ -572,7 +574,9 @@ impl ModelProvider for AnthropicProvider {
             limits,
         )
         .await?;
-        let trace = crate::RequestTrace::of(&response);
+        // The Messages endpoint below a base that names its version (`/v1`),
+        // as a redirect's suggested base_url is written.
+        let trace = crate::RequestTrace::of(&response).below_base(Some("/messages"));
         let provider_id = self.id.clone();
         let mut events = json_stream(response, &trace, cancel, limits);
         // A thinking block's text waits for its signature, which says

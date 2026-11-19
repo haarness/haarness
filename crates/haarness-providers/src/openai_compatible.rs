@@ -63,6 +63,9 @@ pub struct OpenAiCompatibleProvider {
     /// The models whose thinking came here without signatures (see
     /// [`crate::notes::NoteHold::remembering`]).
     unsigned_routes: crate::notes::UnsignedRoutes,
+    /// Haarness Cloud's router, whose address nobody sets: a redirect it
+    /// answers with suggests no `base_url`.
+    fixed_address: bool,
 }
 
 /// Whether each listed model takes audio, by the input modalities its
@@ -193,6 +196,7 @@ impl OpenAiCompatibleProvider {
             replay_observed_reasoning: instance.replay_observed_reasoning,
             listed_audio: ListedAudio::default(),
             unsigned_routes: crate::notes::UnsignedRoutes::default(),
+            fixed_address: false,
         }
     }
 
@@ -200,6 +204,18 @@ impl OpenAiCompatibleProvider {
     pub(crate) fn with_http_client(mut self, client: reqwest::Client) -> Self {
         self.client = client;
         self
+    }
+
+    /// An address the person does not set (see `fixed_address`).
+    pub(crate) fn with_fixed_address(mut self) -> Self {
+        self.fixed_address = true;
+        self
+    }
+
+    /// `tail`, a request's path beyond the base URL, where the person can
+    /// set that base URL (see [`crate::sse::Unfollowed`]).
+    fn beyond_base(&self, tail: &'static str) -> Option<&'static str> {
+        (!self.fixed_address).then_some(tail)
     }
 
     /// Reads and writes what listings say of audio in `listed`.
@@ -347,7 +363,9 @@ impl OpenAiCompatibleProvider {
             .send()
             .await
             .ok()
-            .filter(|response| !crate::sse::unfollowed_listing(&self.id, response))
+            .filter(|response| {
+                !crate::sse::unfollowed_listing(&self.id, response, self.beyond_base("/models"))
+            })
             .and_then(|response| response.error_for_status().ok());
         if let Some(response) = discovered
             && let Ok(body) = response.json::<Value>().await
@@ -653,6 +671,7 @@ impl OpenAiCompatibleProvider {
             replay_observed_reasoning: false,
             listed_audio: ListedAudio::default(),
             unsigned_routes: crate::notes::UnsignedRoutes::default(),
+            fixed_address: false,
         }
     }
 
@@ -2839,7 +2858,8 @@ impl ModelProvider for OpenAiCompatibleProvider {
         }
         // A refusal read here is the stream's first item, as one the stream
         // reads itself would be.
-        let mut trace = crate::RequestTrace::of(&response);
+        let mut trace =
+            crate::RequestTrace::of(&response).below_base(self.beyond_base("/chat/completions"));
         let answer = if !response.status().is_success() && !self.server_output_limit {
             let status = response.status();
             let headers_seen = response.headers().clone();
@@ -2867,7 +2887,8 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     .headers(headers)
                     .json(&body);
                 let response = crate::sse::send(builder, limits).await?;
-                trace = crate::RequestTrace::of(&response);
+                trace = crate::RequestTrace::of(&response)
+                    .below_base(self.beyond_base("/chat/completions"));
                 if response.status().is_success() {
                     Ok(response)
                 } else {
@@ -2882,6 +2903,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
                         status,
                         &headers_seen,
                         &answered,
+                        trace.tail,
                         &text,
                     ))
                 }
@@ -2901,7 +2923,8 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     .headers(headers)
                     .json(&body);
                 let response = crate::sse::send(builder, limits).await?;
-                trace = crate::RequestTrace::of(&response);
+                trace = crate::RequestTrace::of(&response)
+                    .below_base(self.beyond_base("/chat/completions"));
                 Ok(response)
             } else if matches!(status.as_u16(), 404 | 405) && missing_route(&text) {
                 trace.refused(status);
@@ -2916,6 +2939,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
                     status,
                     &headers_seen,
                     &answered,
+                    trace.tail,
                     &text,
                 ))
             }
@@ -8655,5 +8679,65 @@ mod tests {
             results.push(waited(events));
         }
         assert_eq!(results, [true, false]);
+    }
+
+    /// A redirect the client does not follow names the base_url that would
+    /// reach the same API there, except on Haarness Cloud's router, whose
+    /// address nobody sets.
+    #[tokio::test]
+    async fn a_redirect_suggests_a_base_url_only_where_one_can_be_set() {
+        use axum::http::{StatusCode, Uri, header::LOCATION};
+        let app = Router::new().fallback(|uri: Uri| async move {
+            (
+                StatusCode::TEMPORARY_REDIRECT,
+                [(
+                    LOCATION,
+                    format!("https://other.example/team{}", uri.path()),
+                )],
+            )
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/v1", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let refusal = |provider: OpenAiCompatibleProvider| async move {
+            let mut events = provider
+                .with_http_client(
+                    reqwest::Client::builder()
+                        .redirect(reqwest::redirect::Policy::none())
+                        .build()
+                        .unwrap(),
+                )
+                .stream(short_request(), CancellationToken::new())
+                .await
+                .unwrap();
+            events.next().await.unwrap().unwrap_err().to_string()
+        };
+        let instance = CompatibleInstance {
+            id: "team".into(),
+            name: "Team".into(),
+            base_url: base,
+            api_key: Some("key".into()),
+            models: vec!["google/gemini-3.5-flash-lite".into()],
+            discover_models: false,
+            server_output_limit: false,
+            replay_observed_reasoning: false,
+            model_defaults: CompatibleModelDefaults::default(),
+            assume_authenticated: false,
+            headers: crate::ProviderHeaders::default(),
+        };
+        let said = refusal(OpenAiCompatibleProvider::new(instance.clone())).await;
+        assert!(
+            said.ends_with(
+                "If you trust that server, set the provider's base_url to https://other.example/team/v1."
+            ),
+            "{said}"
+        );
+        let said = refusal(OpenAiCompatibleProvider::new(instance).with_fixed_address()).await;
+        assert!(
+            said.ends_with(
+                "redirected this request to https://other.example/team/v1/chat/completions, which Haarness didn't follow, so nothing was sent there."
+            ),
+            "{said}"
+        );
     }
 }

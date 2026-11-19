@@ -838,7 +838,11 @@ impl ModelProvider for OpenAiProvider {
             return Err(subscription
                 .then(|| chatgpt_plan_refusal(&headers, &text, unix_millis() / 1000))
                 .flatten()
-                .unwrap_or_else(|| crate::sse::status_error(status, &headers, &answered, &text)));
+                .unwrap_or_else(|| {
+                    // A ChatGPT sign-in's address is not the person's to set.
+                    let tail = (!subscription).then_some("/responses");
+                    crate::sse::status_error(status, &headers, &answered, tail, &text)
+                }));
         }
         let plan_headers = subscription.then(|| response.headers().clone());
         let trace = crate::RequestTrace::of(&response);

@@ -112,6 +112,7 @@ fn framed_stream(
     if refused {
         trace.refused(response.status());
     }
+    let tail = trace.tail;
     let stream = try_stream! {
         let response = if response.status().is_success() {
             response
@@ -122,7 +123,7 @@ fn framed_stream(
             let body = within(limit, response.text())
                 .await?
                 .unwrap_or_default();
-            Err(status_error(status, &headers, &answered, &body))?;
+            Err(status_error(status, &headers, &answered, tail, &body))?;
             unreachable!();
         };
         let mut chunks = response.bytes_stream();
@@ -258,16 +259,18 @@ fn whole_reply(body: &str) -> CoreResult<Value> {
 
 /// The error for a refused streamed request: `HTTP <status>` with the
 /// provider's own words, and the wait a rate limit names. A redirect the
-/// client did not follow says where it led instead (see [`redirected_to`]),
-/// `answered` being the address that sent it.
+/// client did not follow says where it led instead (see [`Unfollowed`]):
+/// `answered` is the address that sent it, and `tail` the request's path
+/// beyond the provider's `base_url`, when the person can set that.
 pub(crate) fn status_error(
     status: reqwest::StatusCode,
     headers: &reqwest::header::HeaderMap,
     answered: &reqwest::Url,
+    tail: Option<&str>,
     body: &str,
 ) -> CoreError {
-    if let Some(target) = redirected_to(status, headers, answered) {
-        return CoreError::Provider(format!("HTTP {status}: {}", unfollowed_redirect(&target)));
+    if let Some(redirect) = unfollowed_error(status, headers, answered, tail) {
+        return redirect;
     }
     let advised = advised_retry(status, headers);
     let detail = provider_error_detail(body);
@@ -283,62 +286,154 @@ pub(crate) fn status_error(
     CoreError::Provider(message)
 }
 
-/// Where a redirect that came back as the answer led: its `Location`, read
-/// against `answered`, as scheme, host, port and path. A user name,
-/// password, query or fragment there can carry a credential, so they are
-/// left out. `None` when the answer is no such redirect, or leads somewhere
-/// other than an http or https address.
-pub(crate) fn redirected_to(
+/// The error for a redirect that came back as the answer (see
+/// [`Unfollowed::of`]), or `None` for any other answer.
+pub(crate) fn unfollowed_error(
     status: reqwest::StatusCode,
     headers: &reqwest::header::HeaderMap,
     answered: &reqwest::Url,
-) -> Option<String> {
-    if !matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308) {
-        return None;
-    }
-    let location = headers.get(reqwest::header::LOCATION)?.to_str().ok()?;
-    let mut target = answered.join(location.trim()).ok()?;
-    if !matches!(target.scheme(), "http" | "https") {
-        return None;
-    }
-    let _ = target.set_username("");
-    let _ = target.set_password(None);
-    target.set_query(None);
-    target.set_fragment(None);
-    Some(target.into())
+    tail: Option<&str>,
+) -> Option<CoreError> {
+    let redirect = Unfollowed::of(status, headers, answered, tail)?;
+    Some(CoreError::Provider(format!(
+        "HTTP {status}: {}",
+        redirect.words()
+    )))
 }
 
-/// What a person reads of a provider's redirect to `target` that its client
-/// did not follow (a provider a project defines is redirected only below its
-/// own address, Haarness Cloud's router not at all): whether that address is
-/// the provider's is the person's call.
-pub(crate) fn unfollowed_redirect(target: &str) -> String {
-    format!(
-        "the provider redirected this request to {target}. Haarness doesn't follow a provider's redirect away from its address, so nothing was sent there. If you trust that address, change the provider's base_url to point there."
-    )
+/// A redirect that came back as the answer: a provider a project defines is
+/// redirected only below its own address (see `covered_redirect_client`),
+/// Haarness Cloud's router not at all, and a `Location` the HTTP client
+/// cannot read (an unencoded space) is not followed anywhere.
+pub(crate) struct Unfollowed {
+    /// Where it led, as scheme, host, port and path: a user name, password,
+    /// query or fragment there can carry a credential, so they are left
+    /// out, and so is anything in the path that looks like one.
+    pub(crate) target: String,
+    /// It leads off the address the request was sent below, which Haarness
+    /// refuses on purpose. Unknown (false) without the request's tail.
+    pub(crate) away: bool,
+    /// The `base_url` that would send the same request where it led: the
+    /// target without the request's tail, when it ends with that tail. A
+    /// sign-in page or other address that serves no such API gets none.
+    pub(crate) base_url: Option<String>,
+}
+
+impl Unfollowed {
+    /// The redirect `status` and `headers` answer with, read against
+    /// `answered`, the address that sent it. `tail` is the request's path
+    /// beyond the provider's `base_url` (`/chat/completions`), when the
+    /// person can set that. `None` for an answer that is no redirect, or
+    /// one to anything but an http or https address.
+    pub(crate) fn of(
+        status: reqwest::StatusCode,
+        headers: &reqwest::header::HeaderMap,
+        answered: &reqwest::Url,
+        tail: Option<&str>,
+    ) -> Option<Self> {
+        if !matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308) {
+            return None;
+        }
+        let location = headers.get(reqwest::header::LOCATION)?.to_str().ok()?;
+        let mut target = answered.join(location.trim()).ok()?;
+        if !matches!(target.scheme(), "http" | "https") {
+            return None;
+        }
+        let _ = target.set_username("");
+        let _ = target.set_password(None);
+        target.set_query(None);
+        target.set_fragment(None);
+        let shown = haarness_core::redact::text(target.as_str());
+        let tail = tail.filter(|tail| !tail.is_empty());
+        // The address the request went below, as `covered_redirect_client`
+        // fences it.
+        let below = tail
+            .and_then(|tail| answered.path().strip_suffix(tail))
+            .and_then(|base| {
+                let mut base_url = answered.clone();
+                base_url.set_path(base);
+                base_url.set_query(None);
+                crate::auth::key_address(base_url.as_str())
+            });
+        let away = below
+            .as_deref()
+            .is_some_and(|below| !crate::redirect_covered(below, &target));
+        // A base_url written with a credential hidden would not work.
+        let base_url = tail
+            .filter(|_| away && shown == target.as_str())
+            .and_then(|tail| target.path().strip_suffix(tail))
+            .map(|base| {
+                format!(
+                    "{}{}",
+                    target.origin().ascii_serialization(),
+                    base.trim_end_matches('/')
+                )
+            });
+        Some(Self {
+            target: shown,
+            away,
+            base_url,
+        })
+    }
+
+    /// What a person reads of it, after the status line.
+    pub(crate) fn words(&self) -> String {
+        let target = &self.target;
+        match (self.away, &self.base_url) {
+            (true, Some(base_url)) => format!(
+                "the provider redirected this request to {target}. Haarness doesn't follow a provider's redirect away from its address, so nothing was sent there. If you trust that server, set the provider's base_url to {base_url}."
+            ),
+            (true, None) => format!(
+                "the provider redirected this request to {target}. Haarness doesn't follow a provider's redirect away from its address, so nothing was sent there."
+            ),
+            (false, _) => format!(
+                "the provider redirected this request to {target}, which Haarness didn't follow, so nothing was sent there."
+            ),
+        }
+    }
 }
 
 /// Whether `response`, to a request for `provider`'s model list, is a
-/// redirect its client did not follow (see [`redirected_to`]). Its body is
-/// no list, so the configured models stay. The daemon log says where it led
-/// once for each provider and address while this process runs: the list is
-/// asked for again and again.
-pub(crate) fn unfollowed_listing(provider: &str, response: &reqwest::Response) -> bool {
+/// redirect its client did not follow (see [`Unfollowed`]; `tail` is the
+/// list's path beyond the provider's `base_url`). Its body is no list, so
+/// the configured models stay. The daemon log says where it led once for
+/// each provider and address while this process runs: the list is asked
+/// for again and again.
+pub(crate) fn unfollowed_listing(
+    provider: &str,
+    response: &reqwest::Response,
+    tail: Option<&str>,
+) -> bool {
     static LOGGED: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
         std::sync::LazyLock::new(Default::default);
-    let Some(target) = redirected_to(response.status(), response.headers(), response.url()) else {
+    let Some(redirect) =
+        Unfollowed::of(response.status(), response.headers(), response.url(), tail)
+    else {
         return false;
     };
     let first = LOGGED
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .insert(format!("{provider}\n{}", response.url()));
-    if first {
+    if !first {
+        return true;
+    }
+    let status = response.status().as_u16();
+    let to = &redirect.target;
+    if redirect.away {
         tracing::warn!(
             provider,
-            status = response.status().as_u16(),
-            to = %target,
-            "the provider redirected its model list away from its address, which Haarness doesn't follow; if you trust that address, point the provider's base_url there"
+            status,
+            to = %to,
+            suggested_base_url = redirect.base_url.as_deref().map(tracing::field::display),
+            "the provider redirected its model list away from its address, which Haarness doesn't follow"
+        );
+    } else {
+        tracing::warn!(
+            provider,
+            status,
+            to = %to,
+            "the provider redirected its model list, which Haarness didn't follow"
         );
     }
     true
@@ -839,6 +934,7 @@ mod tests {
             reqwest::StatusCode::TOO_MANY_REQUESTS,
             &reqwest::header::HeaderMap::new(),
             &reqwest::Url::parse("https://generativelanguage.googleapis.com/v1beta").unwrap(),
+            None,
             limited,
         );
         assert_eq!(
@@ -915,31 +1011,78 @@ mod tests {
 
     /// A redirect that came back as the answer names where it led, without
     /// the credentials a `Location` may carry, and leaves its body out.
+    /// Away from the provider's address it says Haarness doesn't follow
+    /// that, and names the base_url that would reach the same API there
+    /// when the address ends with the request's own path.
     #[test]
     fn an_unfollowed_redirect_names_where_it_led_and_nothing_secret() {
         use reqwest::{StatusCode, header::HeaderMap};
         let answered =
             reqwest::Url::parse("http://me:pw@gw.example:8080/v1/chat/completions?key=k").unwrap();
-        let error = |status: StatusCode, location: Option<&str>, body: &str| {
+        let error = |status: StatusCode, location: Option<&str>, tail: Option<&str>, body: &str| {
             let mut headers = HeaderMap::new();
             if let Some(location) = location {
                 headers.insert(reqwest::header::LOCATION, location.parse().unwrap());
             }
-            super::status_error(status, &headers, &answered, body).to_string()
+            super::status_error(status, &headers, &answered, tail, body).to_string()
         };
+        let tail = Some("/chat/completions");
         let said = error(
             StatusCode::TEMPORARY_REDIRECT,
-            Some("https://u:p@other.example/v1?k=s#part"),
-            "Redirecting to https://other.example/v1?k=s",
+            Some("https://u:p@other.example/v2/chat/completions?k=s#part"),
+            tail,
+            "Redirecting to https://other.example/v2/chat/completions?k=s",
         );
         assert_eq!(
             said,
-            "provider error: HTTP 307 Temporary Redirect: the provider redirected this request to https://other.example/v1. Haarness doesn't follow a provider's redirect away from its address, so nothing was sent there. If you trust that address, change the provider's base_url to point there."
+            "provider error: HTTP 307 Temporary Redirect: the provider redirected this request to https://other.example/v2/chat/completions. Haarness doesn't follow a provider's redirect away from its address, so nothing was sent there. If you trust that server, set the provider's base_url to https://other.example/v2."
         );
         for secret in ["u:p", "k=s", "part", "Redirecting"] {
             assert!(!said.contains(secret), "{secret}: {said}");
         }
-        // A `Location` relative to the address that answered.
+        // Where the request's own path is not what it led to (a sign-in
+        // page), only the address is named.
+        assert_eq!(
+            error(
+                StatusCode::FOUND,
+                Some("https://login.example/oauth2/start?rd=%2Fv1"),
+                tail,
+                ""
+            ),
+            "provider error: HTTP 302 Found: the provider redirected this request to https://login.example/oauth2/start. Haarness doesn't follow a provider's redirect away from its address, so nothing was sent there."
+        );
+        // Where the address can't be set (Haarness Cloud's router), or the
+        // redirect stays where the provider's address covers (the same over
+        // https, a `Location` the client could not read), it is no more
+        // than not followed.
+        let neutral = |target: &str| {
+            format!(
+                "the provider redirected this request to {target}, which Haarness didn't follow, so nothing was sent there."
+            )
+        };
+        for (location, tail, target) in [
+            (
+                "https://other.example/v2/chat/completions",
+                None,
+                "https://other.example/v2/chat/completions",
+            ),
+            (
+                "https://gw.example:8080/v1/chat/completions",
+                tail,
+                "https://gw.example:8080/v1/chat/completions",
+            ),
+            (
+                "/v1/team a/chat/completions",
+                tail,
+                "http://gw.example:8080/v1/team%20a/chat/completions",
+            ),
+        ] {
+            let said = error(StatusCode::TEMPORARY_REDIRECT, Some(location), tail, "");
+            assert!(said.ends_with(&neutral(target)), "{location}: {said}");
+        }
+        // A `Location` relative to the address that answered, or with
+        // credentials however written, is named as scheme, host, port and
+        // path.
         for (status, location, target) in [
             (
                 StatusCode::MOVED_PERMANENTLY,
@@ -961,31 +1104,68 @@ mod tests {
                 " https://other.example ",
                 "https://other.example/",
             ),
+            (
+                StatusCode::TEMPORARY_REDIRECT,
+                "//who:pw@[::1]:8443/p?t=1",
+                "http://[::1]:8443/p",
+            ),
+            (
+                StatusCode::TEMPORARY_REDIRECT,
+                "https://us%40er:p%3Ass@other.example/p",
+                "https://other.example/p",
+            ),
+            (
+                StatusCode::TEMPORARY_REDIRECT,
+                "?token=t",
+                "http://gw.example:8080/v1/chat/completions",
+            ),
         ] {
-            let said = error(status, Some(location), "");
+            let said = error(status, Some(location), tail, "");
             assert!(
-                said.contains(&format!("redirected this request to {target}. ")),
+                said.contains(&format!("redirected this request to {target}")),
                 "{location}: {said}"
             );
-            assert!(!said.contains("me:pw") && !said.contains("key=k"), "{said}");
+            for secret in ["me:pw", "key=k", "who", "pw@", "us%40er", "token"] {
+                assert!(!said.contains(secret), "{location}: {said}");
+            }
         }
+        // A credential written in the path is hidden too, and no base_url
+        // is offered that would not work as written.
+        let said = error(
+            StatusCode::TEMPORARY_REDIRECT,
+            Some(
+                "https://other.example/sk-proj-abcdefghijklmnopqrstuvwxyz0123456789/chat/completions",
+            ),
+            tail,
+            "",
+        );
+        assert!(
+            !said.contains("abcdefghijklmnopqrstuvwxyz") && !said.contains("base_url"),
+            "{said}"
+        );
         // No address to name: the status line, as before.
         assert_eq!(
-            error(StatusCode::TEMPORARY_REDIRECT, None, ""),
+            error(StatusCode::TEMPORARY_REDIRECT, None, tail, ""),
             "provider error: HTTP 307 Temporary Redirect"
         );
         assert_eq!(
-            error(StatusCode::FOUND, Some("ftp://other.example/x"), ""),
+            error(StatusCode::FOUND, Some("ftp://other.example/x"), tail, ""),
             "provider error: HTTP 302 Found"
         );
         assert_eq!(
-            error(StatusCode::NOT_MODIFIED, Some("https://other.example"), ""),
+            error(
+                StatusCode::NOT_MODIFIED,
+                Some("https://other.example"),
+                tail,
+                ""
+            ),
             "provider error: HTTP 304 Not Modified"
         );
         assert_eq!(
             error(
                 StatusCode::NOT_FOUND,
                 Some("https://other.example"),
+                tail,
                 "no route"
             ),
             "provider error: HTTP 404 Not Found: no route"

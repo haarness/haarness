@@ -11,8 +11,8 @@ run` fails before sending and says why, the TUI keeps a message for it and point
 provider as not connected and says why where it is connected, and connecting it there saves the key
 for that address too, after which a run gets its answer. A project C whose provider's server answers
 every request with a redirect to another port: that port is sent nothing, `haarness run` and the TUI
-say where the redirect pointed (without its user name, password or query) and that `base_url` can be
-pointed there, and the daemon log names the model list's redirect. With HAARNESS_UPGRADE_FROM naming an older Haarness binary, a key that
+say where the redirect pointed (without its user name, password or query) and the `base_url` that would
+reach the same API there, and the daemon log names the model list's redirect. With HAARNESS_UPGRADE_FROM naming an older Haarness binary, a key that
 binary saved for a project's provider keeps working in that project after the update, and is not sent
 to a project opened after it.
 Runs the real binary, daemon and TUI under tmux with an isolated profile.
@@ -289,7 +289,7 @@ def main():
                     "moved-list": {
                         "name": "Moved list", "base_url": f"http://127.0.0.1:{port_r}/listed/v1", "requires_auth": False}}}))
             pointed = f"redirected this request to http://127.0.0.1:{port_l}/openai/v1/chat/completions."
-            advice = "If you trust that address, change the provider's base_url to point there."
+            advice = f"If you trust that server, set the provider's base_url to http://127.0.0.1:{port_l}/openai/v1."
             subprocess.run(["tmux", "kill-session", "-t", session], capture_output=True)
             subprocess.run(["tmux", "new-session", "-d", "-x", "120", "-y", "40", "-s", session, pane_command(env, [binary, "--workspace", project_c])], check=True)
             wait_for("Project C did not open", "Ask anything", timeout=60)
@@ -301,7 +301,8 @@ def main():
             print("\n".join(line.strip() for line in pane().splitlines() if line.strip()).split("Say the proof word.")[-1].strip())
             # The usage panel shares the lines the notice wraps onto, so each phrase is looked for alone.
             for phrase in ("Provider error: HTTP 307 Temporary Redirect", f"http://127.0.0.1:{port_l}/openai/v1/chat/completions.",
-                           "doesn't follow a provider's redirect away from its address", "change the provider's base_url"):
+                           "doesn't follow a provider's redirect away from its address", "set the provider's base_url",
+                           f"http://127.0.0.1:{port_l}/openai/v1."):
                 assert phrase in shown, (phrase, shown)
             assert "who:pw" not in shown and "redirect-secret" not in shown, shown
             done = subprocess.run([binary, "--workspace", project_c, "run", "Say the proof word."], env=env, capture_output=True, text=True, timeout=180)
@@ -314,7 +315,8 @@ def main():
             assert not landing.seen, landing.seen
             logged = [line for path in root.rglob("haarness.log*") if path.is_file() for line in path.read_text(errors="replace").splitlines()
                       if "redirected its model list away from its address" in line]
-            assert logged and all(f"to=http://127.0.0.1:{port_l}/listed/v1/models" in line and "redirect-secret" not in line and "who:pw" not in line
+            assert logged and all(f"to=http://127.0.0.1:{port_l}/listed/v1/models" in line and f"suggested_base_url=http://127.0.0.1:{port_l}/listed/v1" in line
+                                  and "redirect-secret" not in line and "who:pw" not in line
                                   for line in logged), logged
             # Once a process (the TUI's server, then `haarness run`), however often the list is asked for.
             processes = [line.split()[1] for line in logged]

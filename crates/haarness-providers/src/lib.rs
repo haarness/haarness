@@ -170,6 +170,11 @@ pub(crate) struct RequestTrace {
     host: Option<String>,
     id: Option<String>,
     finished: Arc<std::sync::atomic::AtomicBool>,
+    /// The request's path beyond the provider's `base_url`, where the
+    /// person can set that: a redirect it did not follow then names the
+    /// `base_url` that would reach the same API there (see
+    /// [`sse::Unfollowed`]).
+    pub(crate) tail: Option<&'static str>,
 }
 
 impl RequestTrace {
@@ -178,7 +183,15 @@ impl RequestTrace {
             host: response.url().host_str().map(str::to_owned),
             id: request_id(response.headers()),
             finished: Arc::default(),
+            tail: None,
         }
+    }
+
+    /// This trace, for a request whose path beyond the provider's
+    /// `base_url` is `tail` (see [`RequestTrace::tail`]).
+    pub(crate) fn below_base(mut self, tail: Option<&'static str>) -> Self {
+        self.tail = tail;
+        self
     }
 
     pub(crate) fn id(&self) -> Option<&str> {
@@ -2243,42 +2256,64 @@ mod tests {
         )
         .await;
         let leave = format!("{address}/v1/");
+        // Where each was sent, and the base_url that would reach the same API
+        // there; Gemini's requests name no base_url, so it says no more than
+        // that the redirect was not followed.
         for (id, led) in [
-            ("team-anthropic", Some(&hop)),
-            ("team-gemini", Some(&hop)),
-            ("team-azure", Some(&hop)),
+            ("team-anthropic", Some((&hop, Some(format!("{hop}v1"))))),
+            ("team-gemini", Some((&hop, None))),
+            ("team-azure", Some((&hop, Some(format!("{hop}openai/v1"))))),
             ("team-gateway", None),
-            ("team-leave", Some(&leave)),
-            ("team-listed", Some(&hop)),
+            ("team-leave", Some((&leave, Some(format!("{leave}v1"))))),
+            ("team-listed", Some((&hop, Some(format!("{hop}listed/v1"))))),
         ] {
             let provider = haarness_core::ProviderRegistry::get(&registry, id).unwrap();
             assert!(provider.info().authenticated, "{id}");
             provider.refresh_models(true).await;
             provider.refresh_models(true).await;
             let refusal = first_error(&provider).await;
-            let Some(led) = led else {
+            let Some((led, base_url)) = led else {
                 assert_eq!(refusal, None, "{id}");
                 continue;
             };
             let refusal = refusal.unwrap_or_default();
             assert!(
                 refusal.contains(&format!("redirected this request to {led}"))
-                    && refusal.contains("Haarness doesn't follow a provider's redirect")
                     && !refusal.contains('?'),
                 "{id}: {refusal}"
             );
+            match base_url {
+                Some(base_url) => assert!(
+                    refusal.contains("Haarness doesn't follow a provider's redirect away")
+                        && refusal
+                            .ends_with(&format!("set the provider's base_url to {base_url}.")),
+                    "{id}: {refusal}"
+                ),
+                None => assert!(
+                    refusal.ends_with(", which Haarness didn't follow, so nothing was sent there."),
+                    "{id}: {refusal}"
+                ),
+            }
         }
-        // A model list redirected away is named once for each provider, and
-        // the provider keeps its configured models.
-        let listed = logged.lines("the provider redirected its model list away from its address, which Haarness doesn't follow; if you trust that address, point the provider's base_url there");
-        for id in ["team-anthropic", "team-listed"] {
+        // A model list redirected away is named once for each provider, with
+        // the base_url that would reach it, and the provider keeps its
+        // configured models.
+        let listed = logged.lines(
+            "the provider redirected its model list away from its address, which Haarness doesn't follow",
+        );
+        for (id, base_url) in [
+            ("team-anthropic", format!("{hop}v1")),
+            ("team-listed", format!("{hop}listed/v1")),
+        ] {
             let lines: Vec<_> = listed
                 .iter()
                 .filter(|line| line.contains(&format!(" provider={id} ")))
                 .collect();
             assert_eq!(lines.len(), 1, "{id}: {}", logged.all());
             assert!(
-                lines[0].contains(&format!(" to={hop}")) && !lines[0].contains('?'),
+                lines[0].contains(&format!(" to={hop}"))
+                    && lines[0].contains(&format!(" suggested_base_url={base_url}"))
+                    && !lines[0].contains('?'),
                 "{}",
                 lines[0]
             );
