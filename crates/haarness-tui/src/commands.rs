@@ -952,10 +952,7 @@ impl App {
     /// runs, after an undo, or in a subagent's chat, where `/undo` does not
     /// reach it.
     pub(crate) fn stopped_request(&self) -> Option<&haarness_protocol::Item> {
-        if self.active_turn.is_some()
-            || self.thread.revert.is_some()
-            || self.thread.parent_id.is_some()
-        {
+        if self.active_turn.is_some() || self.thread.revert.is_some() || self.thread.is_subagent {
             return None;
         }
         let stop = self.items.iter().rfind(|item| {

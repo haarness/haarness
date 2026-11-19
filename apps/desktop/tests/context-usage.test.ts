@@ -4,6 +4,7 @@ import type { Item, ItemData, Thread } from "@haarness/sdk";
 import {
   contextUsage,
   costNumber,
+  leftOut,
   paceSeconds,
   paceSpeed,
   percentNumber,
@@ -189,4 +190,34 @@ test("context counts, shares and costs are written in the reader's language", ()
     applyLanguage("en");
     global.document = saved;
   }
+});
+test("a turn a safety stop left out is not counted, but a compaction in it and its note are", () => {
+  const inTurn = (sequence: number, turnId: string | null, data: ItemData): Item => ({ ...item(sequence, data), turnId });
+  const stop = (left: boolean): ItemData => ({ type: "error", message: "Stopped by the provider's safety check (refusal).", retryable: false, turn_left_out: left });
+  const note: ItemData = { type: "user_message", text: "<left-out-turn>\nIt changed a.rs.\n</left-out-turn>", synthetic: true };
+  const items = [
+    inTurn(1, "first", { type: "user_message", text: "a".repeat(400) }),
+    inTurn(2, "stopped", { type: "user_message", text: "b".repeat(4000) }),
+    inTurn(3, "stopped", { type: "assistant_message", text: "c".repeat(4000) }),
+    inTurn(4, "stopped", note),
+    inTurn(5, "stopped", stop(true)),
+    inTurn(6, "next", { type: "user_message", text: "d".repeat(40) }),
+  ];
+  assert.deepEqual([...leftOut(items)].sort(), ["2", "3", "5"]);
+  const usage = contextUsage(items, thread);
+  assert.equal(usage.breakdown.find((row) => row.label === "Assistant messages")!.tokens, 0);
+  assert.equal(usage.messages, 3);
+  // A stop an older server stored keeps its turn.
+  assert.equal(leftOut([...items.slice(0, 4), inTurn(5, "stopped", stop(false))]).size, 0);
+  // A fork's copies carry no turn: a stopped turn a background result
+  // started takes the person's turn before it with it no more.
+  const copies = [
+    item(1, { type: "user_message", text: "first" }),
+    item(2, { type: "user_message", text: "<system-reminder>\ndate\n</system-reminder>", synthetic: true }),
+    item(3, { type: "assistant_message", text: "answer" }),
+    item(4, { type: "user_message", text: "<task id=\"t\">result</task>", synthetic: true }),
+    item(5, { type: "assistant_message", text: "partial" }),
+    item(6, stop(true)),
+  ];
+  assert.deepEqual([...leftOut(copies)].sort(), ["4", "5", "6"]);
 });

@@ -12048,6 +12048,13 @@ fn a_safety_stop_that_ended_the_latest_turn_points_to_undo() {
     app.active_turn = Some(haarness_protocol::TurnId::new());
     assert!(!render(&app).contains(hint));
     app.active_turn = None;
+    // A fork has a parent and /undo of its own; a subagent's chat has not.
+    app.thread.parent_id = Some(haarness_protocol::ThreadId::new());
+    assert!(render(&app).contains(hint));
+    app.thread.is_subagent = true;
+    assert!(!render(&app).contains(hint));
+    app.thread.is_subagent = false;
+    app.thread.parent_id = None;
     // Once another turn began, /undo takes that one back.
     app.items.push(message_item(
         4,
