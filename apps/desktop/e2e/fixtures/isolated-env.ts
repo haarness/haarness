@@ -1,12 +1,16 @@
 /** What every Desktop a spec starts gets, whatever the runner's environment
- * holds: no usage statistics, Haarness Cloud on a closed loopback port, and
+ * holds: no usage statistics, Haarness Cloud on a closed loopback port,
  * schedules written into the test's own folders but never handed to launchd,
- * systemd or Task Scheduler (an isolated data folder does not move those). A
- * spec that talks to a Cloud stand-in sets its own HAARNESS_CLOUD_API_URL. */
-export const ISOLATED = {
+ * systemd or Task Scheduler (an isolated data folder does not move those), and
+ * the run's own folder for its chats' temp folders (see playwright.config.ts).
+ * A spec that talks to a Cloud stand-in sets its own HAARNESS_CLOUD_API_URL. */
+export const ISOLATED: Record<string, string> = {
   HAARNESS_TELEMETRY: "0",
   HAARNESS_CLOUD_API_URL: "http://127.0.0.1:9",
   HAARNESS_SCHEDULE_SKIP_INSTALL: "1",
+  ...(process.env.HAARNESS_TEST_CHAT_TEMP
+    ? { HAARNESS_TEST_CHAT_TEMP: process.env.HAARNESS_TEST_CHAT_TEMP }
+    : {}),
 };
 
 /**
