@@ -6293,12 +6293,15 @@ const NO_LINE_END: &str = "\\ No newline at end of file\n";
 /// from the line it replaces: enough to read what the change follows, and in
 /// a terminal row, the change itself.
 const CUT_LINE_LEAD: usize = 40;
+/// The least room left in which a hunk too long to keep whole is still kept
+/// in part: enough for a line or two on each side of its change.
+const CUT_HUNK_MIN_ROOM: usize = 1_024;
 
 /// `diff` as the hunks of a unified diff, numbered as the files are, with no
 /// file headers (the entry names its file), in at most
-/// [`TOOL_DIFF_PATCH_MAX_BYTES`]. Hunks are kept whole while they fit; of a
-/// first hunk too long on its own, the lines from its first change that fit.
-/// Hunks are made one at a time and no line is copied before it is known to
+/// [`TOOL_DIFF_PATCH_MAX_BYTES`]. Hunks are kept whole while they fit; of the
+/// first hunk too long for the room left, the lines from its first change
+/// that fit, when there is room for some. Hunks are made one at a time and no line is copied before it is known to
 /// fit, so a huge change costs no more than the bound. Says whether any of
 /// the change was left out.
 fn bounded_patch(diff: &similar::TextDiff<'_, '_, '_, str>) -> (Option<String>, bool) {
@@ -6309,8 +6312,8 @@ fn bounded_patch(diff: &similar::TextDiff<'_, '_, '_, str>) -> (Option<String>, 
             patch.push_str(&hunk);
             continue;
         }
-        if patch.is_empty() {
-            patch = PatchHunk::cut(diff, &group, room);
+        if patch.is_empty() || room >= CUT_HUNK_MIN_ROOM {
+            patch.push_str(&PatchHunk::cut(diff, &group, room));
         }
         return (Some(patch), true);
     }
@@ -10310,6 +10313,38 @@ export default workflow({
         assert!(lines[1].ends_with('x') || lines[1].contains("xOLDy"));
         assert!(lines[1].contains("xOLDy") && lines[2].contains("xNEWy"));
         assert!(diff.truncated);
+        assert_well_formed(&patch);
+
+        // A short change, then one in a long line further down: the first
+        // whole, and of the second, both sides in the room left.
+        let before: String = (1..=600)
+            .map(|number| {
+                if number == 500 {
+                    long.clone()
+                } else {
+                    format!("line {number}\n")
+                }
+            })
+            .collect();
+        let after = before
+            .replacen("line 10\n", "line ten\n", 1)
+            .replacen("OLD", "NEW", 1);
+        let diff = text_file_diff(
+            "data.txt",
+            FileDiffStatus::Modified,
+            Some(&before),
+            Some(&after),
+        );
+        assert_eq!((diff.additions, diff.deletions), (2, 2));
+        let patch = diff.patch.unwrap();
+        assert!(patch.starts_with("@@ -7,7 +7,7 @@\n"), "{}", &patch[..80]);
+        assert!(
+            patch.contains("\n+line ten\n line 11\n line 12\n line 13\n@@ -500,1 +500,1 @@\n-"),
+            "{}",
+            &patch[..200]
+        );
+        assert!(patch.contains("xOLDy") && patch.contains("xNEWy"));
+        assert!(patch.len() <= TOOL_DIFF_PATCH_MAX_BYTES && diff.truncated);
         assert_well_formed(&patch);
 
         // A large file removed whole whose one line is longer than the bound.
