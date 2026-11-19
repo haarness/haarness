@@ -685,6 +685,206 @@ fn links_that_fan_out_into_one_another_stop_at_a_limit() {
     assert!(started.elapsed() < std::time::Duration::from_secs(30));
 }
 
+#[cfg(unix)]
+#[test]
+fn a_project_link_brings_in_only_what_a_profile_saves_or_markdown() {
+    use std::os::unix::fs::symlink;
+    let fixture = Fixture::new();
+    let source = fixture.roots("source");
+    let project = &source.project;
+    // A cloned repository ships links to files only this computer has.
+    put(project, ".dev.vars", "TOKEN=dev secret");
+    put(project, ".envrc", "export TOKEN=envrc secret");
+    put(
+        project,
+        ".npmrc",
+        "//registry.example.test/:_authToken=npm secret",
+    );
+    put(project, "secrets/prod.tfvars", "password = \"prod secret\"");
+    put(project, ".haarness/skills/deploy/SKILL.md", "deploy");
+    symlink(".dev.vars", project.join("AGENTS.md")).unwrap();
+    let deploy = project.join(".haarness/skills/deploy");
+    symlink("../../../.envrc", deploy.join("envrc.md")).unwrap();
+    symlink("../../../.npmrc", deploy.join("npmrc")).unwrap();
+    symlink("../../../secrets", deploy.join("secrets")).unwrap();
+    // Instructions kept as Markdown elsewhere in the project still come in.
+    put(project, "docs/agents.md", "shared instructions");
+    symlink("../docs/agents.md", project.join(".haarness/AGENTS.md")).unwrap();
+    // But not as a file where a profile saves only a folder.
+    fs::create_dir_all(project.join(".agents")).unwrap();
+    symlink("../docs/agents.md", project.join(".agents/commands")).unwrap();
+    let saved = Archive::capture(&source, "cloned", Scope::Local).unwrap();
+    let mut expected = vec![
+        project.join(".agents/commands"),
+        project.join("AGENTS.md"),
+        deploy.join("envrc.md"),
+        deploy.join("npmrc"),
+        deploy.join("secrets"),
+    ];
+    expected.sort();
+    assert_eq!(saved.left_out, expected);
+    let archive = Archive::decode(&saved.bytes).unwrap();
+    let names: Vec<_> = archive.files.keys().map(String::as_str).collect();
+    assert_eq!(
+        names,
+        [
+            "project/.haarness/AGENTS.md",
+            "project/.haarness/skills/deploy/SKILL.md"
+        ]
+    );
+    assert_eq!(
+        archive.files["project/.haarness/AGENTS.md"],
+        b"shared instructions"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn saving_from_the_home_folder_never_follows_a_link_into_its_private_folders() {
+    use std::os::unix::fs::symlink;
+    let fixture = Fixture::new();
+    let home = fixture.0.join("home");
+    let roots = Roots {
+        config: home.join(".config/haarness"),
+        data: home.join(".local/share/haarness"),
+        project: home.clone(),
+    };
+    for path in [&roots.config, &roots.data] {
+        fs::create_dir_all(path).unwrap();
+    }
+    put(&home, ".ssh/id_ed25519", "ssh secret");
+    put(&home, ".aws/credentials", "aws secret");
+    put(&roots.config, "tui-servers.json", "server secret");
+    put(&roots.config, "skills/own/SKILL.md", "own");
+    let cloud = home.join(".agents/skills/cloud");
+    put(&cloud, "SKILL.md", "cloud");
+    symlink("../../../.ssh/id_ed25519", cloud.join("key.md")).unwrap();
+    symlink("../../../.aws", cloud.join("aws")).unwrap();
+    symlink(
+        "../../../.config/haarness/tui-servers.json",
+        cloud.join("servers.md"),
+    )
+    .unwrap();
+    let saved = Archive::capture(&roots, "home", Scope::Both).unwrap();
+    let mut expected = vec![
+        cloud.join("aws"),
+        cloud.join("key.md"),
+        cloud.join("servers.md"),
+    ];
+    expected.sort();
+    assert_eq!(saved.left_out, expected);
+    let archive = Archive::decode(&saved.bytes).unwrap();
+    let names: Vec<_> = archive.files.keys().map(String::as_str).collect();
+    assert_eq!(
+        names,
+        [
+            "global/config/skills/own/SKILL.md",
+            "project/.agents/skills/cloud/SKILL.md"
+        ]
+    );
+}
+
+/// A link that led outside when the file was opened, then was put back to
+/// look harmless, is judged by the file that was opened.
+#[cfg(unix)]
+#[test]
+fn a_file_is_judged_by_what_was_opened_not_by_its_path() {
+    use std::os::unix::fs::symlink;
+    let fixture = Fixture::new();
+    let source = fixture.roots("source");
+    let secret = fixture.0.join("outside/id_race");
+    put(&fixture.0, "outside/id_race", "race secret");
+    put(&source.project, ".haarness/skills/x/SKILL.md", "skill");
+    let link = source.project.join(".haarness/skills/x/r.md");
+    symlink(&secret, &link).unwrap();
+    let file = open(&link).unwrap();
+    fs::remove_file(&link).unwrap();
+    symlink("SKILL.md", &link).unwrap();
+    let project = Place::new(&source.project, "project", Reach::SavedOrMarkdown);
+    let opened = held(&file, &link);
+    assert!(
+        opened
+            .as_deref()
+            .is_none_or(|opened| project.inside(opened).is_none()),
+        "{opened:?}"
+    );
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    assert_eq!(opened, Some(secret));
+}
+
+/// While something swaps a skill's file between itself, a link inside and a
+/// link to a secret outside, no save ever carries the secret.
+#[cfg(unix)]
+#[test]
+fn a_link_swapped_while_saving_never_brings_in_a_file_outside() {
+    use std::{
+        os::unix::fs::symlink,
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+    };
+    let fixture = Fixture::new();
+    let source = fixture.roots("source");
+    put(&fixture.0, "outside/id_race", "race secret");
+    let skill = source.project.join(".haarness/skills/x");
+    put(&skill, "SKILL.md", "skill");
+    put(&skill, "r.md", "harmless");
+    let stop = Arc::new(AtomicBool::new(false));
+    let swapper = {
+        let (stop, skill, secret, next) = (
+            stop.clone(),
+            skill.clone(),
+            fixture.0.join("outside/id_race"),
+            fixture.0.join("next"),
+        );
+        std::thread::spawn(move || {
+            let mut turn = 0_usize;
+            while !stop.load(Ordering::Relaxed) {
+                let _ = fs::remove_file(&next);
+                match turn % 3 {
+                    0 => symlink(&secret, &next).unwrap(),
+                    1 => symlink("SKILL.md", &next).unwrap(),
+                    _ => fs::write(&next, "harmless").unwrap(),
+                }
+                fs::rename(&next, skill.join("r.md")).unwrap();
+                turn += 1;
+            }
+        })
+    };
+    for _ in 0..150 {
+        let saved = Archive::capture(&source, "race", Scope::Local).unwrap();
+        let archive = Archive::decode(&saved.bytes).unwrap();
+        assert!(
+            archive.files.values().all(|data| data != b"race secret"),
+            "a save carried the secret"
+        );
+    }
+    stop.store(true, Ordering::Relaxed);
+    swapper.join().unwrap();
+}
+
+#[test]
+fn only_a_link_that_leads_nowhere_is_passed_over_quietly() {
+    let fixture = Fixture::new();
+    let source = fixture.roots("source");
+    let project = Place::new(&source.project, "project", Reach::SavedOrMarkdown);
+    // A saved folder that cannot be resolved is an error, not an empty save.
+    assert!(
+        project
+            .judge(&source.project.join(".haarness"), Scope::Local, &[])
+            .is_err()
+    );
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink("gone", source.project.join(".agents")).unwrap();
+        assert!(matches!(
+            project.judge(&source.project.join(".agents"), Scope::Local, &[]),
+            Ok(Link::Skip)
+        ));
+    }
+}
+
 #[test]
 fn installed_plugins_are_bundled_with_disabled_state_without_absolute_registry_paths() {
     let fixture = Fixture::new();

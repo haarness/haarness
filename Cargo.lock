@@ -1765,6 +1765,8 @@ dependencies = [
  "dunce",
  "fs2",
  "jsonc-parser",
+ "nix 0.31.3",
+ "same-file",
  "serde",
  "serde_json",
  "sha2",

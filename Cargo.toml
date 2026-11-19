@@ -86,6 +86,8 @@ rustls-platform-verifier = "0.7"
 # system without them.
 rustls-native-certs = "0.8"
 secrecy = { version = "0.10", features = ["serde"] }
+# Whether an open file is the one a path names, on Windows without unsafe code here.
+same-file = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
 socket2 = { version = "0.6.5", features = ["all"] }

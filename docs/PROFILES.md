@@ -66,20 +66,23 @@ folder is left out too, notably [prompt files](PROMPT-FILES.md) (`prompts/`),
 the terminal UI's own state and history (`tui-state.toml` and the others) and
 the switches Settings keeps in `capabilities.json`.
 
-A symbolic link is followed only while it stays inside the folder being saved,
-and is then saved as the files it leads to, under the link's own name. In the
-project that is anywhere in the project: a skill shared by `.agents` and
-`.haarness`, or an `AGENTS.md` that points at another instructions file. In the
-configuration and data folders it is a part a profile saves from them, and in
-an installed plugin it is the plugin's own folder. A saved folder that is itself
-a link follows the same rule. Any other link is left out and the save carries
-on: a skill linked in from a dotfiles repository, or a link to `.env`, a key, a
-credential store or the chat database. `profile save` names what it left out on
-one line, and `--json` lists those paths under `leftOut`. Links that lead
-nowhere, or back into a folder that holds them, are passed over, and a save
-stops with an error rather than follow more than 1,000 links. Archives never
-hold links: a restore writes regular files and still refuses a link on any path
-it writes to.
+A symbolic link is followed only when it leads to files the profile would
+save anyway, and is then saved as those files under the link's own name: a
+skill shared by `.agents` and `.haarness`, a command linked to an agent's file
+in the configuration folder, or anything inside an installed plugin's own
+folder. In a project, a link may also lead to a Markdown file anywhere in it,
+so an `AGENTS.md` that points at `CLAUDE.md` comes along. A saved folder that is
+itself a link follows the same rule. Any other link is left out and the save
+carries on: a skill linked in from a dotfiles repository, a link to `.env` or
+`.npmrc` or a secrets folder in the project, to `~/.ssh` when saving from the
+home folder, or to the configuration folder's sign-ins. `profile save` names
+what it left out on one line, and `--json` lists those paths under `leftOut`.
+Every file is checked again once it is open, by the path the system gives the
+open file, so a link swapped in while a save runs cannot bring in another.
+Links that lead nowhere, or back into a folder that holds them, are passed
+over, and a save stops with an error rather than follow more than 1,000 links.
+Archives never hold links: a restore writes regular files and still refuses a
+link on any path it writes to.
 
 **Configuration and scripts can contain inline secrets.** Archives retain
 their contents, including literal environment/header values, and are neither

@@ -104,7 +104,7 @@ pub struct Archive {
 }
 
 /// A saved profile archive, and the symbolic links it was saved without
-/// because they lead outside the folders it saves.
+/// because they lead to files a profile does not save.
 pub struct Saved {
     pub bytes: Vec<u8>,
     pub left_out: Vec<PathBuf>,
@@ -347,16 +347,16 @@ impl Archive {
     pub fn capture(roots: &Roots, name: &str, scope: Scope) -> Result<Saved> {
         validate_name(name)?;
         let mut files = BTreeMap::new();
-        let mut links = Links::default();
+        let mut walk = Walk::default();
         if scope != Scope::Local {
-            let config = Place::new(&roots.config, "global/config", false);
+            let config = Place::new(&roots.config, "global/config", Reach::Saved);
             collect(
                 &roots.config,
                 "global/config",
                 &config,
                 scope,
                 &mut files,
-                &mut links,
+                &mut walk,
             )?;
             // The walk above never enters `plugins/`, whose only portable part
             // is `plugins/local/` (global plugins and marketplace MCP bundles).
@@ -366,9 +366,9 @@ impl Archive {
                 &config,
                 scope,
                 &mut files,
-                &mut links,
+                &mut walk,
             )?;
-            let data = Place::new(&roots.data, "global/data", false);
+            let data = Place::new(&roots.data, "global/data", Reach::Saved);
             for name in ["skills", "plugins/local"] {
                 collect(
                     &roots.data.join(name),
@@ -376,7 +376,7 @@ impl Archive {
                     &data,
                     scope,
                     &mut files,
-                    &mut links,
+                    &mut walk,
                 )?;
             }
             // Bundle installed content instead of copying machine-specific registry paths.
@@ -393,8 +393,8 @@ impl Archive {
                     );
                     // The registry names the plugin's folder, wherever it
                     // is, so that folder is the one its links stay inside.
-                    let place = Place::new(&plugin.path, &prefix, true);
-                    collect(&plugin.path, &prefix, &place, scope, &mut files, &mut links)?;
+                    let place = Place::new(&plugin.path, &prefix, Reach::Whole);
+                    collect(&plugin.path, &prefix, &place, scope, &mut files, &mut walk)?;
                     if !plugin.enabled {
                         files.insert(format!("{prefix}/.haarness-disabled"), (Vec::new(), false));
                     }
@@ -402,7 +402,7 @@ impl Archive {
             }
         }
         if scope != Scope::Global {
-            let project = Place::new(&roots.project, "project", true);
+            let project = Place::new(&roots.project, "project", Reach::SavedOrMarkdown);
             for name in CONFIG_FILES.iter().chain(PROJECT_DIRS.iter()) {
                 collect(
                     &roots.project.join(name),
@@ -410,7 +410,7 @@ impl Archive {
                     &project,
                     scope,
                     &mut files,
-                    &mut links,
+                    &mut walk,
                 )?;
             }
         }
@@ -467,7 +467,7 @@ impl Archive {
         }
         let bytes = zip.finish()?.into_inner();
         Self::decode(&bytes)?;
-        let mut left_out = links.left_out;
+        let mut left_out = walk.left_out;
         left_out.sort();
         left_out.dedup();
         Ok(Saved { bytes, left_out })
@@ -681,81 +681,128 @@ type Captured = BTreeMap<String, (Vec<u8>, bool)>;
 /// into one another cannot keep a save walking the same folders.
 const MAX_LINKS: usize = 1000;
 
+/// How far inside its folder a symbolic link may lead and still be saved.
+#[derive(Clone, Copy)]
+enum Reach {
+    /// Anywhere: an installed plugin's folder is saved whole.
+    Whole,
+    /// Only to what a profile saves from the folder: the configuration and
+    /// data folders also hold sign-ins, history and other state of this
+    /// computer.
+    Saved,
+    /// To what a profile saves from the project, or to a Markdown file in it
+    /// (an `AGENTS.md` kept as `CLAUDE.md`). A project also holds files no
+    /// profile carries, such as untracked secrets, and may be the home folder.
+    SavedOrMarkdown,
+}
+
 /// A folder a profile saves from. A symbolic link met while saving it is
-/// saved as what it leads to only when that stays inside this folder.
+/// saved as what it leads to only when that is inside this folder and within
+/// its reach, and so is every file the save opens.
 struct Place<'a> {
     /// The folder's real path, every link on the way to it resolved.
     real: PathBuf,
     /// The archive path its contents are saved under.
     prefix: &'a str,
-    /// Whether a link may lead anywhere inside it (the project, a plugin's
-    /// folder), or only to the parts a profile saves from it (the
-    /// configuration and data folders, which also hold sign-ins, history and
-    /// other state of this computer).
-    whole: bool,
+    reach: Reach,
 }
 
 /// What a save does with a symbolic link.
 enum Link {
-    /// Save what it leads to, as regular files under the link's own path.
-    Follow,
+    /// Save what it leads to, this real path, under the link's own name.
+    Follow(PathBuf),
     /// Pass over it without a word: it leads nowhere, or back into a folder
-    /// that holds it, whose files are saved where they are.
+    /// the save is inside, whose files are saved where they are.
     Skip,
-    /// Leave it out and say so: it leads outside the saved folders.
-    Outside,
+    /// Leave it out and say so: it leads to files a profile does not save.
+    LeftOut,
 }
 
+/// What one save keeps track of while it walks.
 #[derive(Default)]
-struct Links {
+struct Walk {
     left_out: Vec<PathBuf>,
     followed: usize,
+    used: usize,
+    /// The real folders holding the folder links being followed, outermost
+    /// first: a link back to one of them, or above, would never end.
+    holding: Vec<PathBuf>,
 }
 
 impl<'a> Place<'a> {
-    fn new(folder: &Path, prefix: &'a str, whole: bool) -> Self {
+    fn new(folder: &Path, prefix: &'a str, reach: Reach) -> Self {
         Self {
             real: dunce::canonicalize(folder).unwrap_or_else(|_| folder.to_path_buf()),
             prefix,
-            whole,
+            reach,
         }
     }
 
-    /// The verdict for `path`, a link or a saved folder that is, or sits
-    /// under, a link.
-    fn judge(&self, path: &Path, scope: Scope) -> Link {
-        let Ok(target) = dunce::canonicalize(path) else {
-            return Link::Skip;
-        };
-        let Some(relative) = target
-            .strip_prefix(&self.real)
-            .ok()
-            .and_then(Path::to_str)
+    /// Where `real`, a real path, is inside this folder, as an archive-style
+    /// relative path; none when it is outside.
+    fn inside(&self, real: &Path) -> Option<String> {
+        real.strip_prefix(&self.real)
+            .ok()?
+            .to_str()
             .map(|relative| relative.replace('\\', "/"))
-        else {
-            return Link::Outside;
-        };
-        if path
-            .parent()
-            .and_then(|parent| dunce::canonicalize(parent).ok())
-            .is_some_and(|parent| parent.starts_with(&target))
-        {
-            return Link::Skip;
-        }
+    }
+
+    /// Whether `real`, at `relative` inside this folder, is within its reach.
+    fn reaches(&self, relative: &str, real: &Path, scope: Scope) -> bool {
         if relative.is_empty() {
-            return Link::Follow;
+            return true;
         }
-        // A link to a file a profile never carries (`.env`, keys, credential
-        // stores, dependencies) cannot bring it in under another name.
-        if excluded(&relative) {
-            return Link::Outside;
+        // `.env` files, keys, credential stores and dependencies stay out
+        // under any name.
+        if excluded(relative) {
+            return false;
         }
         let saved = format!("{}/{relative}", self.prefix);
-        if self.whole || allowed(&saved, scope) || allowed(&format!("{saved}/_"), scope) {
-            Link::Follow
-        } else {
-            Link::Outside
+        let portable = allowed(&saved, scope) || allowed(&format!("{saved}/_"), scope);
+        match self.reach {
+            Reach::Whole => true,
+            Reach::Saved => portable,
+            Reach::SavedOrMarkdown => {
+                portable
+                    || PROJECT_DIRS.contains(&relative)
+                    || (Path::new(relative)
+                        .extension()
+                        .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
+                        && real.is_file())
+            }
         }
+    }
+
+    /// The verdict for `path`: a link, or a saved folder that is, or sits
+    /// under, one.
+    fn judge(&self, path: &Path, scope: Scope, holding: &[PathBuf]) -> Result<Link> {
+        let target = match dunce::canonicalize(path) {
+            Ok(target) => target,
+            Err(_) if path.is_symlink() && fs::metadata(path).is_err() => return Ok(Link::Skip),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("profile source cannot be resolved: {}", path.display())
+                });
+            }
+        };
+        let Some(relative) = self.inside(&target) else {
+            return Ok(Link::LeftOut);
+        };
+        let parent = path
+            .parent()
+            .and_then(|parent| dunce::canonicalize(parent).ok());
+        if parent
+            .iter()
+            .chain(holding)
+            .any(|folder| folder.starts_with(&target))
+        {
+            return Ok(Link::Skip);
+        }
+        Ok(if self.reaches(&relative, &target, scope) {
+            Link::Follow(target)
+        } else {
+            Link::LeftOut
+        })
     }
 }
 
@@ -765,26 +812,41 @@ fn collect(
     place: &Place,
     scope: Scope,
     files: &mut Captured,
-    links: &mut Links,
+    walk: &mut Walk,
 ) -> Result<()> {
     match fs::symlink_metadata(root) {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.into()),
         Ok(_) => {}
     }
+    walk.used = files.values().map(|(bytes, _)| bytes.len()).sum();
     // A saved folder that is itself a link, or sits under one, follows the
     // same rule as a link inside it.
-    match place.judge(root, scope) {
-        Link::Follow => {}
-        Link::Skip => return Ok(()),
-        Link::Outside => {
-            links.left_out.push(root.to_path_buf());
-            return Ok(());
+    match place.judge(root, scope, &[])? {
+        Link::Follow(real) => save(&real, root, prefix, place, scope, files, walk),
+        Link::Skip => Ok(()),
+        Link::LeftOut => {
+            walk.left_out.push(root.to_path_buf());
+            Ok(())
         }
     }
-    let mut used: usize = files.values().map(|(bytes, _)| bytes.len()).sum();
-    let mut walk = walkdir::WalkDir::new(root)
-        .follow_links(true)
+}
+
+/// Save what the real folder or file `real` holds under the archive path
+/// `prefix`; `shown` is where the person sees it. Links are never followed
+/// by the walk itself, so no linked folder is opened before it is judged.
+fn save(
+    real: &Path,
+    shown: &Path,
+    prefix: &str,
+    place: &Place,
+    scope: Scope,
+    files: &mut Captured,
+    walk: &mut Walk,
+) -> Result<()> {
+    for entry in walkdir::WalkDir::new(real)
+        .follow_links(false)
+        .follow_root_links(false)
         .into_iter()
         .filter_entry(|entry| {
             if entry.depth() == 0 {
@@ -793,71 +855,78 @@ fn collect(
             if entry.file_name().to_str().is_some_and(macos_clutter) {
                 return false;
             }
-            let relative = entry.path().strip_prefix(root).unwrap_or(Path::new(""));
+            let relative = entry.path().strip_prefix(real).unwrap_or(Path::new(""));
             let path = format!("{prefix}/{}", relative.to_string_lossy().replace('\\', "/"));
             allowed(&path, scope) || allowed(&format!("{path}/_"), scope)
-        });
-    while let Some(entry) = walk.next() {
-        let entry = match entry {
-            Ok(entry) => entry,
-            // A link that leads nowhere, or back to a folder this walk is
-            // inside, has nothing more to save.
-            Err(error)
-                if error.loop_ancestor().is_some()
-                    || error.path().is_some_and(|path| {
-                        path.is_symlink() && dunce::canonicalize(path).is_err()
-                    }) =>
-            {
-                continue;
-            }
-            Err(error) => return Err(error.into()),
-        };
-        let relative = entry.path().strip_prefix(root)?;
+        })
+    {
+        let entry = entry?;
+        let relative = entry.path().strip_prefix(real)?;
         let suffix = relative
             .to_str()
             .context("profile filename must be UTF-8")?
             .replace('\\', "/");
-        let path = if suffix.is_empty() {
-            prefix.into()
+        let (path, named) = if suffix.is_empty() {
+            (prefix.to_owned(), shown.to_path_buf())
         } else {
-            format!("{prefix}/{suffix}")
+            (format!("{prefix}/{suffix}"), shown.join(relative))
         };
         if !allowed(&path, scope) && !allowed(&format!("{path}/_"), scope) {
             continue;
         }
-        if entry.depth() > 0 && entry.path_is_symlink() {
-            let verdict = place.judge(entry.path(), scope);
-            if !matches!(verdict, Link::Follow) {
-                if matches!(verdict, Link::Outside) {
-                    links.left_out.push(entry.path().to_path_buf());
+        if entry.file_type().is_symlink() {
+            match place.judge(entry.path(), scope, &walk.holding)? {
+                // A file where a profile saves only folders would not be a
+                // portable archive.
+                Link::Follow(target) if target.is_file() && !allowed(&path, scope) => {
+                    walk.left_out.push(named);
                 }
-                if entry.file_type().is_dir() {
-                    walk.skip_current_dir();
+                Link::Follow(target) => {
+                    walk.followed += 1;
+                    ensure!(
+                        walk.followed <= MAX_LINKS,
+                        "profile has more than {MAX_LINKS} symbolic links to follow"
+                    );
+                    walk.holding
+                        .push(entry.path().parent().unwrap_or(real).to_path_buf());
+                    let saved = save(&target, &named, &path, place, scope, files, walk);
+                    walk.holding.pop();
+                    saved?;
                 }
-                continue;
+                Link::Skip => {}
+                Link::LeftOut => walk.left_out.push(named),
             }
-            links.followed += 1;
-            ensure!(
-                links.followed <= MAX_LINKS,
-                "profile has more than {MAX_LINKS} symbolic links to follow"
-            );
+            continue;
         }
         if entry.file_type().is_dir() {
             continue;
         }
         ensure!(entry.file_type().is_file(), "profile source is not regular");
-        let metadata = entry.metadata()?;
-        used -= files.get(&path).map_or(0, |(bytes, _)| bytes.len());
+        let file = open(entry.path())?;
+        // Judge the file that was opened rather than its path, so a link put
+        // in place since the path was walked cannot bring in another file.
+        let opened = held(&file, entry.path());
+        if !opened.is_some_and(|opened| {
+            place
+                .inside(&opened)
+                .is_some_and(|relative| place.reaches(&relative, &opened, scope))
+        }) {
+            walk.left_out.push(named);
+            continue;
+        }
+        let metadata = file.metadata()?;
+        ensure!(metadata.is_file(), "profile source is not regular");
+        walk.used -= files.get(&path).map_or(0, |(bytes, _)| bytes.len());
         ensure!(
-            metadata.len() <= (MAX_EXPANDED - used) as u64,
+            metadata.len() <= (MAX_EXPANDED - walk.used) as u64,
             "profile exceeds archive limits"
         );
         let mut data = Vec::new();
-        File::open(entry.path())?
-            .take((MAX_EXPANDED - used) as u64 + 1)
+        (&file)
+            .take((MAX_EXPANDED - walk.used) as u64 + 1)
             .read_to_end(&mut data)?;
         ensure!(
-            used + data.len() <= MAX_EXPANDED,
+            walk.used + data.len() <= MAX_EXPANDED,
             "profile exceeds expanded limit"
         );
         #[cfg(unix)]
@@ -867,10 +936,65 @@ fn collect(
         };
         #[cfg(not(unix))]
         let executable = false;
-        used += data.len();
+        walk.used += data.len();
         files.insert(path, (data, executable));
     }
     Ok(())
+}
+
+/// Open `path` to read it, without waiting on a named pipe put in its place.
+fn open(path: &Path) -> std::io::Result<File> {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOCTTY);
+    }
+    options.open(path)
+}
+
+/// The real path of the file `opened` holds, as the system names it, which
+/// a link put in place of `path` since it was opened does not change. Where
+/// the system cannot say (Windows, Linux without `/proc`), the real path of
+/// `path` while it still names that very file; otherwise none.
+fn held(opened: &File, path: &Path) -> Option<PathBuf> {
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    {
+        let mut real = PathBuf::new();
+        if nix::fcntl::fcntl(opened, nix::fcntl::FcntlArg::F_GETPATH(&mut real)).is_ok() {
+            return Some(real);
+        }
+    }
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        use std::os::fd::AsRawFd as _;
+        if let Ok(real) = fs::read_link(format!("/proc/self/fd/{}", opened.as_raw_fd())) {
+            return Some(real);
+        }
+    }
+    let real = dunce::canonicalize(path).ok()?;
+    still_names(opened, &real).then_some(real)
+}
+
+#[cfg(unix)]
+fn still_names(opened: &File, real: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (opened.metadata(), fs::metadata(real)) {
+        (Ok(opened), Ok(named)) => (opened.dev(), opened.ino()) == (named.dev(), named.ino()),
+        _ => false,
+    }
+}
+
+#[cfg(not(unix))]
+fn still_names(opened: &File, real: &Path) -> bool {
+    match (
+        opened.try_clone().and_then(same_file::Handle::from_file),
+        same_file::Handle::from_path(real),
+    ) {
+        (Ok(opened), Ok(named)) => opened == named,
+        _ => false,
+    }
 }
 
 fn private_dir(path: &Path) -> Result<()> {
