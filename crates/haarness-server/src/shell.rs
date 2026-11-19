@@ -139,7 +139,8 @@ struct Spawned {
 /// hooks); the parent environment is otherwise inherited, minus the server's
 /// private variables (`haarness_core::private_env_names`). `agent` is the
 /// chat a command the agent runs is for (`None` for a person's own command):
-/// see [`mark_agent`].
+/// see [`mark_agent`]. `temp` is the chat's own temp folder, which a login
+/// profile cannot move (see `haarness_ripgrep::shell_command_in`).
 async fn spawn(
     command: &str,
     workdir: &Path,
@@ -147,6 +148,7 @@ async fn spawn(
     directory: &Path,
     env: &BTreeMap<String, String>,
     agent: Option<ThreadId>,
+    temp: Option<&Path>,
 ) -> CoreResult<Spawned> {
     // Git for Windows' bash on Windows when Git is installed, else cmd.exe;
     // the choice is gone before anything here waits.
@@ -156,7 +158,7 @@ async fn spawn(
             haarness_core::agent_shell::AgentShell::GitBash(bash) => Some(bash.as_path()),
             _ => None,
         };
-        haarness_ripgrep::shell_command(command, windows_bash).map_err(|e| {
+        haarness_ripgrep::shell_command_in(command, windows_bash, temp).map_err(|e| {
             CoreError::Tool(format!(
                 "The command did not start: its shell could not be set up ({e})."
             ))
@@ -446,6 +448,7 @@ fn terminating_signal(status: std::process::ExitStatus) -> Option<String> {
 /// A person's own command, a workflow's, a definition's snippet: run in the
 /// foreground until it ends, its deadline (`timeout_ms`, 0 for none) or the
 /// stop of `cancel`. See [`spawn`] for the rest.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run(
     command: &str,
     workdir: &Path,
@@ -454,6 +457,7 @@ pub(crate) async fn run(
     directory: &Path,
     env: &BTreeMap<String, String>,
     agent: Option<ThreadId>,
+    temp: Option<&Path>,
 ) -> CoreResult<ToolOutput> {
     // A command with no deadline can print until it is stopped (`npm run
     // dev`, `tail -f`): its saved output keeps only its start.
@@ -462,7 +466,7 @@ pub(crate) async fn run(
     } else {
         u64::MAX
     };
-    let spawned = spawn(command, workdir, save_limit, directory, env, agent).await?;
+    let spawned = spawn(command, workdir, save_limit, directory, env, agent, temp).await?;
     let process = &spawned.process;
     let mut end = process.end.clone();
     let deadline = async {
@@ -512,6 +516,7 @@ pub(crate) async fn run_call(
     directory: &Path,
     env: &BTreeMap<String, String>,
     agent: Option<ThreadId>,
+    temp: Option<&Path>,
 ) -> CoreResult<ToolOutput> {
     call.check_start(request.background)?;
     // A deadline in the foreground saves all of the output; without one
@@ -528,6 +533,7 @@ pub(crate) async fn run_call(
         directory,
         env,
         agent,
+        temp,
     )
     .await?;
     let process = CommandProcess {
@@ -791,6 +797,7 @@ mod tests {
             &root,
             &BTreeMap::new(),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -809,6 +816,7 @@ mod tests {
             &root,
             &env,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -820,6 +828,7 @@ mod tests {
             &CancellationToken::new(),
             &root,
             &BTreeMap::new(),
+            None,
             None,
         )
         .await
@@ -847,6 +856,7 @@ mod tests {
                     &CancellationToken::new(),
                     &root,
                     &BTreeMap::new(),
+                    None,
                     None,
                 )
                 .await
@@ -901,6 +911,7 @@ mod tests {
             &root,
             &BTreeMap::new(),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -937,6 +948,7 @@ mod tests {
                 &root,
                 &BTreeMap::new(),
                 None,
+                None,
             )
             .await
             .unwrap();
@@ -951,6 +963,7 @@ mod tests {
             &CancellationToken::new(),
             &root,
             &env,
+            None,
             None,
         )
         .await
@@ -973,6 +986,7 @@ mod tests {
                     &token,
                     &work,
                     &BTreeMap::new(),
+                    None,
                     None,
                 )
                 .await
@@ -1012,6 +1026,7 @@ mod tests {
             &root,
             &BTreeMap::new(),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1028,6 +1043,7 @@ mod tests {
             &CancellationToken::new(),
             &root,
             &BTreeMap::new(),
+            None,
             None,
         )
         .await
@@ -1061,6 +1077,7 @@ mod tests {
             &root,
             &BTreeMap::new(),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1085,6 +1102,7 @@ mod tests {
             &CancellationToken::new(),
             &root,
             &BTreeMap::new(),
+            None,
             None,
         )
         .await
@@ -1118,6 +1136,7 @@ mod tests {
                     &CancellationToken::new(),
                     &root,
                     &BTreeMap::new(),
+                    None,
                     None,
                 ),
             )
@@ -1172,6 +1191,7 @@ mod tests {
                     &root,
                     &BTreeMap::new(),
                     None,
+                    None,
                 )
                 .await
                 .unwrap();
@@ -1198,6 +1218,7 @@ mod tests {
                 &CancellationToken::new(),
                 &root,
                 &BTreeMap::new(),
+                None,
                 None,
             ),
         )
@@ -1291,7 +1312,16 @@ mod tests {
         env: &BTreeMap<String, String>,
         agent: Option<ThreadId>,
     ) -> String {
-        let output = run(script, root, 0, &CancellationToken::new(), root, env, agent)
+        let output = run(
+            script,
+            root,
+            0,
+            &CancellationToken::new(),
+            root,
+            env,
+            agent,
+            None,
+        )
             .await
             .unwrap();
         assert_eq!(output.metadata["exit"], 0, "{output:?}");
@@ -1528,6 +1558,7 @@ mod git_bash_tests {
             workdir,
             &BTreeMap::new(),
             None,
+            None,
         )
         .await
     }
@@ -1624,6 +1655,7 @@ mod git_bash_tests {
                     &token,
                     &work,
                     &BTreeMap::new(),
+                    None,
                     None,
                 )
                 .await

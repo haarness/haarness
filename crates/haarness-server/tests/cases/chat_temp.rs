@@ -78,6 +78,42 @@ impl HookPort for Elsewhere {
     }
 }
 
+/// A `shell.env` hook that gives commands `.0` as their home folder, whose
+/// login profile sets the temp folder variables.
+struct ProfileHome(PathBuf);
+#[async_trait]
+impl HookPort for ProfileHome {
+    async fn pre_tool_use(&self, _: &HookCall, _: &str, _: &Value) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn post_tool_use(
+        &self,
+        _: &HookCall,
+        _: &str,
+        _: &Value,
+        _: &str,
+        _: bool,
+    ) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn user_prompt_submit(&self, _: &HookCall, _: &str) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn permission_request(
+        &self,
+        _: &HookCall,
+        _: &str,
+        _: &[String],
+        _: Option<&[String]>,
+        _: &Value,
+    ) -> HookDecision {
+        HookDecision::default()
+    }
+    async fn shell_env(&self, _: ThreadId, _: &Path) -> BTreeMap<String, String> {
+        BTreeMap::from([("HOME".to_owned(), self.0.display().to_string())])
+    }
+}
+
 /// A runtime under Haarness's default rules, in Review.
 fn runtime(workspace: &Path, hooks: Option<Arc<dyn HookPort>>) -> (AgentRuntime, Capturing) {
     runtime_with(workspace, hooks, RuntimeConfig::default())
@@ -511,6 +547,45 @@ async fn child_agents_background_commands_a_person_and_a_workflow_share_the_chat
         .await
         .unwrap();
     assert_eq!(result.output.metadata["stdout"], format!("{shown}{shown}"));
+    haarness_core::chat_temp::remove(thread);
+}
+
+/// A login profile that sets `TMPDIR`, `TMP` and `TEMP` runs after the
+/// command's environment is set; the command still gets the chat's folder,
+/// so what it does with `$TMPDIR`, which asked nothing, stays there.
+#[tokio::test]
+async fn a_login_profile_cannot_move_the_chat_s_temp_folder() {
+    let fixture = Fixture::new();
+    let home = fixture.0.join("home");
+    std::fs::create_dir_all(home.join("mytmp")).unwrap();
+    std::fs::write(home.join("mytmp/keep.txt"), "keep").unwrap();
+    std::fs::write(
+        home.join(".profile"),
+        "export TMPDIR=\"$HOME/mytmp\" TMP=\"$HOME/mytmp\" TEMP=\"$HOME/mytmp\"\n",
+    )
+    .unwrap();
+    let (runtime, _) = runtime(
+        &fixture.project(),
+        Some(Arc::new(ProfileHome(home.clone()))),
+    );
+    let thread = new_chat(&runtime).await;
+    runs_unasked(
+        &runtime,
+        thread,
+        &bash(
+            r#"printf '%s|%s|%s|' "$TMPDIR" "$TMP" "$TEMP"; rm -rf "$TMPDIR"/*; echo made > "$TMPDIR/made.txt""#,
+        ),
+    )
+    .await;
+    let folder = haarness_core::chat_temp::existing(thread).unwrap();
+    let shown = folder.display().to_string();
+    assert_eq!(
+        last_output(&runtime, thread).await,
+        format!("exit: 0\n{shown}|{shown}|{shown}|")
+    );
+    assert!(home.join("mytmp/keep.txt").is_file());
+    assert!(!home.join("mytmp/made.txt").exists());
+    assert!(folder.join("made.txt").is_file());
     haarness_core::chat_temp::remove(thread);
 }
 

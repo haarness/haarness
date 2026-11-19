@@ -182,22 +182,54 @@ fn path_with_binary(binary: &Path, existing: Option<&OsStr>) -> io::Result<OsStr
 /// `PATH` as it is (said once in the log). On Windows `windows_bash` is the
 /// bash to run it in (Git for Windows'), else it runs in cmd.exe.
 pub fn shell_command(script: &str, windows_bash: Option<&Path>) -> io::Result<Command> {
-    shell_from(script, binary_path(), windows_bash)
+    shell_command_in(script, windows_bash, None)
+}
+
+/// [`shell_command`] for a chat's command, which gets `temp` (its own temp
+/// folder) as `TMPDIR`, `TMP` and `TEMP`. A login shell's profiles run after
+/// the environment is set and may set them again, so they are set again on
+/// the script's first line, as the bundled rg's folder is put back on
+/// `PATH`, from an argument no profile changes. Should a profile keep one
+/// of them read-only, the script does not run: its permission was checked
+/// with the folder there. In cmd.exe, which runs no profile, they are set
+/// in the environment alone.
+pub fn shell_command_in(
+    script: &str,
+    windows_bash: Option<&Path>,
+    temp: Option<&Path>,
+) -> io::Result<Command> {
+    shell_from(script, binary_path(), windows_bash, temp)
 }
 
 fn shell_from(
     script: &str,
     binary: io::Result<PathBuf>,
     windows_bash: Option<&Path>,
+    temp: Option<&Path>,
 ) -> io::Result<Command> {
-    match binary {
-        Ok(binary) => shell_with_binary(script, Some(&binary), windows_bash),
+    let mut command = match binary {
+        Ok(binary) => shell_with_binary(script, Some(&binary), windows_bash, temp),
         Err(error) => {
             unavailable(&error);
-            shell_with_binary(script, None, windows_bash)
+            shell_with_binary(script, None, windows_bash, temp)
+        }
+    }?;
+    if let Some(temp) = temp {
+        for name in TEMP_VARIABLES {
+            command.env(name, temp);
         }
     }
+    Ok(command)
 }
+
+/// The variables a chat's commands find its own temp folder in.
+const TEMP_VARIABLES: [&str; 3] = ["TMPDIR", "TMP", "TEMP"];
+
+/// The script's line that sets the temp folder variables again from the
+/// next argument (see [`shell_command_in`]). `command` keeps a read-only
+/// one from ending the shell before it says why.
+const TEMP_LINE: &str = "command export TMPDIR=\"$1\" TMP=\"$1\" TEMP=\"$1\" 2>/dev/null || { \
+     printf '%s\\n' 'The login profile keeps TMPDIR, TMP or TEMP read-only, so the temp folder of this chat could not be set; the command did not run.' >&2; exit 126; }; shift; ";
 
 /// `argument` as the MSYS and Cygwin runtime reads a Windows command line
 /// back into one word: always in double quotes (an unquoted word holding
@@ -222,6 +254,7 @@ fn shell_with_binary(
     script: &str,
     binary: Option<&Path>,
     windows_bash: Option<&Path>,
+    temp: Option<&Path>,
 ) -> io::Result<Command> {
     #[cfg(windows)]
     let mut command = {
@@ -230,16 +263,25 @@ fn shell_with_binary(
             // A login shell, as elsewhere, so Git's profile puts its tools
             // and the Windows PATH on PATH (`MSYS2_PATH_TYPE=inherit`); it
             // stays in the command's folder (`CHERE_INVOKING`), and a `cd`
-            // goes where the script says, never through a `CDPATH`.
+            // goes where the script says, never through a `CDPATH`. The temp
+            // folder is set again in Windows' spelling with forward slashes
+            // (`C:/Users/…`), which Git's tools and Windows programs both
+            // read, and `echo $TMPDIR` shows a path the file tools take
+            // (Git's runtime would have made it `/tmp/…`).
+            let line = if temp.is_some() { TEMP_LINE } else { "" };
             let mut command = Command::new(bash);
             command
                 .raw_arg("-lc")
                 .raw_arg(msys_quoted(&format!(
-                    "command unset CDPATH 2>/dev/null || :\n{script}"
+                    "{line}command unset CDPATH 2>/dev/null || :\n{script}"
                 )))
                 .env("CHERE_INVOKING", "1")
                 .env("MSYS2_PATH_TYPE", "inherit")
                 .env_remove("CDPATH");
+            if let Some(temp) = temp {
+                let forward = temp.to_string_lossy().replace('\\', "/");
+                command.raw_arg("sh").raw_arg(msys_quoted(&forward));
+            }
             command
         } else {
             // cmd.exe parses its own command line, not C-runtime quoting:
@@ -264,11 +306,13 @@ fn shell_with_binary(
         } else {
             ""
         };
+        // Then the chat's own temp folder, over what a profile set.
+        let line = if temp.is_some() { TEMP_LINE } else { "" };
         command
             .args([
                 "-lc",
                 &format!(
-                    "{restore}shift; \
+                    "{restore}shift; {line}\
                      command unset CDPATH 2>/dev/null || :\n{script}"
                 ),
                 "sh",
@@ -276,6 +320,7 @@ fn shell_with_binary(
             .arg(binary.map_or_else(PathBuf::new, |binary| {
                 binary.parent().expect("binary directory").to_path_buf()
             }))
+            .args(temp)
             .env_remove("CDPATH");
         command
     };
@@ -334,7 +379,7 @@ mod tests {
             "printf %s \"$BASH_EXECUTION_STRING\"\n# second line\t\u{65e5}\u{672c} \\\n",
             "printf %s \"$BASH_EXECUTION_STRING\" # ends in a backslash \\",
         ] {
-            let output = shell_with_binary(script, None, Some(bash))
+            let output = shell_with_binary(script, None, Some(bash), None)
                 .unwrap()
                 .stdin(std::process::Stdio::null())
                 .output()
@@ -414,7 +459,7 @@ mod tests {
         #[cfg(unix)]
         {
             let root = tempfile::tempdir().unwrap();
-            let output = shell_from("printf 'ran:%s' \"$#\"", failed(), None)
+            let output = shell_from("printf 'ran:%s' \"$#\"", failed(), None, None)
                 .unwrap()
                 .current_dir(root.path())
                 .env("HOME", root.path())
@@ -435,7 +480,8 @@ mod tests {
         home: &Path,
         cdpath: Option<&Path>,
     ) -> std::process::Output {
-        let mut command = shell_with_binary(script, Some(&folder.join("bin/rg")), None).unwrap();
+        let mut command =
+            shell_with_binary(script, Some(&folder.join("bin/rg")), None, None).unwrap();
         command.current_dir(folder).env("HOME", home);
         if let Some(cdpath) = cdpath {
             command.env("CDPATH", cdpath);
@@ -495,6 +541,53 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&output.stderr), "");
     }
 
+    /// A chat's command gets its own temp folder as `TMPDIR`, `TMP` and
+    /// `TEMP` whatever a login profile sets them to, with no argument left
+    /// over; a profile that keeps one read-only stops the command with a
+    /// line that says why. Without a folder, the profile's value stays.
+    #[cfg(unix)]
+    #[test]
+    fn a_chat_s_temp_folder_wins_over_what_a_login_profile_sets() {
+        let root = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let script = r#"printf '%s|%s|%s|%s' "$TMPDIR" "$TMP" "$TEMP" "$#""#;
+        let run = |temp: Option<&Path>| {
+            shell_with_binary(script, Some(&root.path().join("bin/rg")), None, temp)
+                .unwrap()
+                .current_dir(root.path())
+                .env("HOME", home.path())
+                .envs(temp.map(|temp| ("TMPDIR", temp)))
+                .output()
+                .unwrap()
+        };
+        fs::write(
+            home.path().join(".profile"),
+            "export TMPDIR=/profile TMP=/profile TEMP=/profile\n",
+        )
+        .unwrap();
+        let shown = temp.path().display();
+        let output = run(Some(temp.path()));
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            format!("{shown}|{shown}|{shown}|0")
+        );
+        let output = run(None);
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "/profile|/profile|/profile|0"
+        );
+        fs::write(home.path().join(".profile"), "readonly TMPDIR=/profile\n").unwrap();
+        let output = run(Some(temp.path()));
+        assert_eq!(output.status.code(), Some(126), "{output:?}");
+        assert!(output.stdout.is_empty(), "{output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("read-only"),
+            "{output:?}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn login_shell_finds_bundled_rg_with_spaces_and_shell_metacharacters() {
@@ -507,6 +600,7 @@ mod tests {
         let output = shell_with_binary(
             "command -v rg; rg --version; printf 'args:%s' \"$#\"",
             Some(&binary),
+            None,
             None,
         )
         .unwrap()

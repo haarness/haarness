@@ -4322,6 +4322,7 @@ impl Tool for BuiltinTool {
                         &tool_output_dir(),
                         &shell_environment(&context),
                         agent,
+                        context.execution.temp_folder.as_deref(),
                     )
                     .await
                 } else {
@@ -4333,6 +4334,7 @@ impl Tool for BuiltinTool {
                         &tool_output_dir(),
                         &shell_environment(&context),
                         agent,
+                        context.execution.temp_folder.as_deref(),
                     )
                     .await
                 };

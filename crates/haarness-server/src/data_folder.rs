@@ -307,6 +307,7 @@ mod tests {
                     folder,
                     &BTreeMap::new(),
                     None,
+                    None,
                 )
                 .await
                 .unwrap();
