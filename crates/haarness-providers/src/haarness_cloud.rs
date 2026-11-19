@@ -267,6 +267,7 @@ async fn router_transport(client: &Client, grant: &Grant) -> CoreResult<OpenAiCo
         headers: ProviderHeaders::default(),
     })
     .with_http_client(http)
+    .with_fixed_address()
     .with_server_output_limit())
 }
 

@@ -64,6 +64,15 @@ async fn send(
     if status.is_success() {
         return KeyCheck::Accepted;
     }
+    // A redirect its client did not follow says nothing of the key.
+    if let Some(redirect) =
+        crate::sse::Unfollowed::of(status, response.headers(), response.url(), None)
+    {
+        return KeyCheck::Unchecked(format!(
+            "{name} redirected the check to {}, which Haarness didn't follow, so the key wasn't sent there",
+            redirect.target
+        ));
+    }
     let reason = response.text().await.ok().and_then(|body| reason(&body));
     classify(name, status.as_u16(), reason, official)
 }
@@ -268,6 +277,35 @@ mod tests {
         assert_eq!(
             send("Acme", client.get(&url).send(), true).await,
             KeyCheck::Rejected(Some("Missing Authentication Token".into()))
+        );
+    }
+
+    /// A listing redirected elsewhere, which the client does not follow,
+    /// keeps the key and says where it led, without its query.
+    #[tokio::test]
+    async fn a_redirected_listing_keeps_the_key_and_says_where_it_led() {
+        use axum::{Router, http::StatusCode, http::header::LOCATION, routing::get};
+        let router = Router::new().route(
+            "/models",
+            get(|| async {
+                (
+                    StatusCode::TEMPORARY_REDIRECT,
+                    [(LOCATION, "http://who:pw@127.0.0.1:9/v1/models?token=t")],
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        assert_eq!(
+            check("Acme", client.get(format!("http://{address}/models")).bearer_auth("sk-real")).await,
+            KeyCheck::Unchecked(
+                "Acme redirected the check to http://127.0.0.1:9/v1/models, which Haarness didn't follow, so the key wasn't sent there".into()
+            )
         );
     }
 

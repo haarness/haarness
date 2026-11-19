@@ -809,6 +809,7 @@ impl ModelProvider for OpenAiProvider {
         while !response.status().is_success() {
             let status = response.status();
             let headers = response.headers().clone();
+            let answered = response.url().clone();
             let trace = crate::RequestTrace::of(&response);
             let text = crate::sse::within(limits.idle(false), response.text())
                 .await?
@@ -845,7 +846,11 @@ impl ModelProvider for OpenAiProvider {
             return Err(subscription
                 .then(|| chatgpt_plan_refusal(&headers, &text, unix_millis() / 1000))
                 .flatten()
-                .unwrap_or_else(|| crate::sse::status_error(status, &headers, &text)));
+                .unwrap_or_else(|| {
+                    // A ChatGPT sign-in's address is not the person's to set.
+                    let route = (!subscription).then(|| crate::sse::Route::plain("/responses"));
+                    crate::sse::status_error(status, &headers, &answered, route, &text)
+                }));
         }
         let plan_headers = subscription.then(|| response.headers().clone());
         let trace = crate::RequestTrace::of(&response);
