@@ -340,22 +340,3 @@ test("keys translated through a variable are in the catalog", () => {
     [],
   );
 });
-
-// The computer use terms come from the server in English, and Desktop shows
-// each sentence through t(): every one of them, and each heading, needs a
-// translation. They are read from the Rust source, so a reworded term fails
-// here until its translations follow.
-test("every sentence of the computer use terms is in the catalog", async () => {
-  const source = await readFile(new URL("../../../crates/haarness-computer/src/terms.rs", import.meta.url), "utf8");
-  const literals = (text: string) => [...text.matchAll(/"((?:[^"\\]|\\.)*)"/g)].map(([, value]) => value.replace(/\\(.)/g, "$1"));
-  const sentences = [
-    ...[...source.matchAll(/pub const (?:TITLE|INTRO): &str = ([\s\S]*?);/g)].flatMap(([, body]) => literals(body)),
-    ...[...source.matchAll(/pub const (?:FOR|NOT_FOR|UNDERSTAND): &\[&str\] = &\[([\s\S]*?)\];/g)].flatMap(([, body]) => literals(body)),
-    ...[...source.matchAll(/"heading": "([^"]+)"/g)].map(([, heading]) => heading),
-  ];
-  assert.ok(sentences.length >= 17, String(sentences.length));
-  assert.deepEqual(
-    sentences.filter((key) => !Object.hasOwn(dictionaries.en, key)),
-    [],
-  );
-});

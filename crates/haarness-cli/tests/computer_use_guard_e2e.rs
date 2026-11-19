@@ -5,7 +5,7 @@
 //! file under another name. The server runs the stand-in helper, so nothing touches the screen.
 #![cfg(target_os = "macos")]
 
-use haarness_computer::{INSIDE_REFUSAL, INSIDE_RESUME_REFUSAL, terms};
+use haarness_computer::{INSIDE_REFUSAL, INSIDE_RESUME_REFUSAL};
 use serde_json::{Value, json};
 use std::{
     path::{Path, PathBuf},
@@ -255,12 +255,12 @@ fn until(what: &str, mut done: impl FnMut() -> bool) {
 #[test]
 fn only_a_person_widens_computer_use_or_ends_a_pause_even_from_a_program_left_running() {
     let fixture = Fixture::new();
-    // The person agrees and turns it on from their own client.
-    let accepted = fixture.api(
+    // The person turns it on from their own client, in one step.
+    let on = fixture.api(
         "/manage/computer-use",
-        &json!({"action": "accept", "version": terms::VERSION}),
+        &json!({"action": "enable", "enabled": true}),
     );
-    assert_eq!(accepted["data"]["enabled"], true, "{accepted}");
+    assert_eq!(on["data"]["enabled"], true, "{on}");
     let allowed = fixture.api(
         "/manage/computer-use",
         &json!({"action": "app", "bundle": "com.apple.TextEdit", "rule": "allow"}),
@@ -332,7 +332,12 @@ fn only_a_person_widens_computer_use_or_ends_a_pause_even_from_a_program_left_ru
                 &root.join("left-app.json"),
             ),
             fixture.post_line(
-                &json!({"action": "accept", "version": terms::VERSION}),
+                &json!({"action": "enable", "enabled": true}),
+                &root.join("left-enable.json"),
+            ),
+            // How earlier clients switch on.
+            fixture.post_line(
+                &json!({"action": "accept", "version": "2"}),
                 &root.join("left-accept.json"),
             ),
             format!(
@@ -364,6 +369,7 @@ fn only_a_person_widens_computer_use_or_ends_a_pause_even_from_a_program_left_ru
         ("left-resume.json", INSIDE_RESUME_REFUSAL),
         ("left-configure.json", INSIDE_REFUSAL),
         ("left-app.json", INSIDE_REFUSAL),
+        ("left-enable.json", INSIDE_REFUSAL),
         ("left-accept.json", INSIDE_REFUSAL),
         ("left-cli.txt", INSIDE_REFUSAL),
     ] {
@@ -492,12 +498,12 @@ fn a_renamed_haarness_still_refuses_its_agents_and_answers_its_person() {
     let built = PathBuf::from(env!("CARGO_BIN_EXE_haarness"));
     for (renamed, from_built) in [("hn", false), ("haarness-test", true)] {
         let fixture = Fixture::running(Some(renamed));
-        // The person agrees, then switches off, so that switching on would widen too.
-        let accepted = fixture.api(
+        // The person switches on, then off, so that switching on would widen too.
+        let on = fixture.api(
             "/manage/computer-use",
-            &json!({"action": "accept", "version": terms::VERSION}),
+            &json!({"action": "enable", "enabled": true}),
         );
-        assert_eq!(accepted["data"]["enabled"], true, "{renamed}: {accepted}");
+        assert_eq!(on["data"]["enabled"], true, "{renamed}: {on}");
         let off = fixture.api(
             "/manage/computer-use",
             &json!({"action": "enable", "enabled": false}),

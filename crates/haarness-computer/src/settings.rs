@@ -1,10 +1,11 @@
-//! Persisted computer use settings: the on/off switch, the accepted terms and the app rules. They are machine-wide,
-//! kept as `computer-use.json` in the global configuration folder, where an agent's file tools need a person's
-//! approval to make changes.
+//! Persisted computer use settings: the on/off switch and the app rules. They are machine-wide, kept as
+//! `computer-use.json` in the global configuration folder, where an agent's file tools need a person's approval to
+//! make changes.
 
 use crate::policy::{self, Rule};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
     fs,
@@ -15,20 +16,22 @@ use std::{
 
 pub const FILE_NAME: &str = "computer-use.json";
 
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Agreement {
-    pub version: String,
-    /// RFC 3339.
-    pub accepted_at: String,
-}
+/// Earlier builds kept computer use off until the person accepted versioned terms, recorded in this file as
+/// `terms: {"version", "acceptedAt"}`, and the last version they asked for was this one. This build has no terms: it
+/// keeps whatever record the file holds, and switching on writes this version when the record names another, so an
+/// earlier build reading the same file (a server not yet restarted after an update, or a downgrade) sees computer use
+/// on as well, rather than off behind terms. The status reports it as accepted for earlier clients.
+pub(crate) const EARLIER_TERMS_VERSION: &str = "2";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
-    /// The person's switch. Agents use the screen only while it is on and the current terms are agreed.
+    /// The person's switch: agents use the screen only while it is on.
     pub enabled: bool,
-    pub terms: Option<Agreement>,
+    /// The record earlier builds look for before they use the screen (see [`EARLIER_TERMS_VERSION`]). This build
+    /// never reads it.
+    #[serde(rename = "terms", skip_serializing_if = "Option::is_none")]
+    earlier_terms: Option<Value>,
     /// What happens in an app without a rule: `ask` (the default) or `allow`.
     pub default_act: Rule,
     /// Briefly highlight each click target on screen.
@@ -41,7 +44,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             enabled: false,
-            terms: None,
+            earlier_terms: None,
             default_act: Rule::Ask,
             ring: true,
             apps: BTreeMap::new(),
@@ -50,23 +53,21 @@ impl Default for Settings {
 }
 
 impl Settings {
-    #[must_use]
-    pub fn accepted(&self) -> bool {
-        self.terms
-            .as_ref()
-            .is_some_and(|terms| terms.version == crate::terms::VERSION)
-    }
-
-    /// Whether the person agreed to earlier terms than today's, which changed since: clients say so above the terms.
-    #[must_use]
-    pub fn terms_changed(&self) -> bool {
-        self.terms.is_some() && !self.accepted()
-    }
-
-    /// On with the current terms agreed.
-    #[must_use]
-    pub fn on(&self) -> bool {
-        self.enabled && self.accepted()
+    /// Turns the switch on or off. On also leaves the record earlier builds need to agree (see
+    /// [`EARLIER_TERMS_VERSION`]); off leaves it as it is, since the switch alone says off to every build.
+    pub fn switch(&mut self, on: bool) {
+        self.enabled = on;
+        if on
+            && self
+                .earlier_terms
+                .as_ref()
+                .is_none_or(|terms| terms["version"] != EARLIER_TERMS_VERSION)
+        {
+            self.earlier_terms = Some(json!({
+                "version": EARLIER_TERMS_VERSION,
+                "acceptedAt": chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+            }));
+        }
     }
 
     /// The rule for `bundle`: an exact rule first, then the longest matching prefix rule.
@@ -205,44 +206,80 @@ mod tests {
         let store = Store::new(dir.path());
         assert_eq!(store.get(), Settings::default());
         fs::write(store.path(), "{not json").unwrap();
-        assert!(!store.get().on());
+        assert!(!store.get().enabled);
     }
 
     #[test]
-    fn on_needs_the_current_terms() {
+    fn the_switch_alone_says_on_whatever_terms_an_earlier_build_recorded() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path());
-        let settings = store.update(|settings| settings.enabled = true).unwrap();
-        assert!(!settings.on());
-        assert!(!settings.terms_changed(), "never agreed: nothing changed");
-        // Agreed to the first terms, before Auto's reviewer could answer: off until today's are agreed, and clients
-        // say the terms changed.
-        let settings = store
-            .update(|settings| {
-                settings.terms = Some(Agreement {
-                    version: "1".into(),
-                    accepted_at: "2026-01-01T00:00:00Z".into(),
-                });
-            })
-            .unwrap();
-        assert!(!settings.on());
-        assert!(settings.terms_changed());
-        let settings = store
-            .update(|settings| {
-                settings.terms = Some(Agreement {
-                    version: crate::terms::VERSION.into(),
-                    accepted_at: "2026-01-01T00:00:00Z".into(),
-                });
-            })
-            .unwrap();
-        assert!(settings.on());
-        assert!(!settings.terms_changed());
-        // Another process changed the file: the next read sees it.
-        let mut changed = settings.clone();
-        changed.enabled = false;
+        // On, though the agreement is to terms an earlier build later replaced, or there is none: on.
+        for earlier in [
+            json!({"enabled": true, "terms": {"version": "1", "acceptedAt": "2026-01-01T00:00:00Z"}}),
+            json!({"enabled": true}),
+        ] {
+            fs::write(store.path(), earlier.to_string()).unwrap();
+            assert!(store.get().enabled, "{earlier}");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // Off with today's agreement on record: off.
+        fs::write(
+            store.path(),
+            json!({"enabled": false, "terms": {"version": "2", "acceptedAt": "2026-11-07T00:00:00Z"}})
+                .to_string(),
+        )
+        .unwrap();
+        assert!(!store.get().enabled);
+        // Switched on in one step, and another process changing the file is seen on the next read.
+        let mut settings = store.update(|settings| settings.switch(true)).unwrap();
+        assert!(settings.enabled);
+        settings.enabled = false;
         std::thread::sleep(std::time::Duration::from_millis(20));
-        fs::write(store.path(), serde_json::to_vec_pretty(&changed).unwrap()).unwrap();
-        assert!(!store.get().on());
+        fs::write(store.path(), serde_json::to_vec_pretty(&settings).unwrap()).unwrap();
+        assert!(!store.get().enabled);
+    }
+
+    /// How earlier builds read the file: on only with `enabled` and an agreement to version 2.
+    fn on_for_an_earlier_build(store: &Store) -> bool {
+        let file: Value = serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+        file["enabled"] == true
+            && file["terms"]["version"] == "2"
+            && file["terms"]["acceptedAt"].is_string()
+    }
+
+    #[test]
+    fn an_earlier_build_sharing_the_file_agrees_with_the_switch() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path());
+        // Never agreed anywhere: switching on here is on for an earlier build too.
+        store.update(|settings| settings.switch(true)).unwrap();
+        assert!(on_for_an_earlier_build(&store));
+        // Off is off for both, and switching on again keeps the record as it was.
+        let kept = fs::read_to_string(store.path()).unwrap();
+        store.update(|settings| settings.switch(false)).unwrap();
+        assert!(!on_for_an_earlier_build(&store));
+        store.update(|settings| settings.switch(true)).unwrap();
+        assert_eq!(fs::read_to_string(store.path()).unwrap(), kept);
+        // An agreement to the first terms stays as it was through other changes, and switching on brings it up to
+        // the version earlier builds ask for.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let first = json!({"version": "1", "acceptedAt": "2026-01-01T00:00:00Z"});
+        fs::write(
+            store.path(),
+            json!({"enabled": false, "terms": first}).to_string(),
+        )
+        .unwrap();
+        store.update(|settings| settings.ring = false).unwrap();
+        let file: Value = serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+        assert_eq!(file["terms"], first);
+        store.update(|settings| settings.switch(true)).unwrap();
+        assert!(on_for_an_earlier_build(&store));
+        // A file that never had a record gets none from changes that do not switch on.
+        let fresh = tempfile::tempdir().unwrap();
+        let store = Store::new(fresh.path());
+        store.update(|settings| settings.ring = false).unwrap();
+        let file: Value = serde_json::from_slice(&fs::read(store.path()).unwrap()).unwrap();
+        assert!(file.get("terms").is_none(), "{file}");
     }
 
     #[test]

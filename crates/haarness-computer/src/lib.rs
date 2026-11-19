@@ -1,7 +1,7 @@
 //! Computer use for Haarness agents: the `mac_*` tools let them look at this Mac's screen and operate its apps. The
-//! feature stays off until the person accepts the terms and switches it on (Settings → Computer use in Desktop, `/mac`
-//! in the terminal UI, `haarness mac on`), and it is only offered on macOS, by a build with the helper, to the user
-//! signed in at the screen.
+//! feature stays off until the person switches it on (Settings → Computer use in Desktop, `/mac` in the terminal UI,
+//! `haarness mac on`), and it is only offered on macOS, by a build with the helper, to the user signed in at the
+//! screen.
 //!
 //! Modules: [`helper`] drives the native process, [`settings`] stores the person's choices, [`policy`] knows the
 //! locked app groups, [`lease`] lets one chat hold the screen at a time, and `tools` holds what the model calls.
@@ -10,14 +10,13 @@ pub mod helper;
 pub mod lease;
 pub mod policy;
 pub mod settings;
-pub mod terms;
 mod tools;
 
 use crate::{
     helper::{Event, Helper, HelperError, Source},
     lease::Lease,
     policy::Rule,
-    settings::{Agreement, Settings, Store},
+    settings::{Settings, Store},
 };
 use haarness_core::{EventBus, Tool};
 use haarness_protocol::ThreadId;
@@ -338,11 +337,11 @@ impl Computer {
         self.helper.available()
     }
 
-    /// Whether this turn offers the tools: supported, on with the current terms, and the person who runs this server
-    /// is the one logged in at the screen. Cheap: one cached settings read and one file check.
+    /// Whether this turn offers the tools: supported, switched on, and the person who runs this server is the one
+    /// logged in at the screen. Cheap: one cached settings read and one file check.
     #[must_use]
     pub fn offered(&self) -> bool {
-        self.supported() && self.store.get().on() && self.at_screen()
+        self.supported() && self.store.get().enabled && self.at_screen()
     }
 
     fn at_screen(&self) -> bool {
@@ -433,7 +432,7 @@ impl Computer {
                 () = cancel.cancelled() => return Err(HelperError::new("cancelled", "Stopped.")),
                 _ = renewal.tick() => {
                     // Switched off in another process (`haarness mac off`): the waiting agent learns it from the caller.
-                    if !self.store.get().on() {
+                    if !self.store.get().enabled {
                         return Ok(true);
                     }
                     // Refreshing this process's holder only: a pause never takes the screen from another chat.
@@ -504,7 +503,7 @@ impl Computer {
         }
         let supported = self.supported();
         let permissions = if supported {
-            let idle = if settings.on() {
+            let idle = if settings.enabled {
                 helper::IDLE
             } else {
                 helper::IDLE_WHEN_OFF
@@ -528,15 +527,11 @@ impl Computer {
             "supported": supported,
             "platform": std::env::consts::OS,
             "console": supported && self.at_screen(),
-            "enabled": settings.on(),
+            "enabled": settings.enabled,
             "switch": settings.enabled,
-            "terms": {
-                "version": terms::VERSION,
-                "accepted": settings.accepted(),
-                "acceptedAt": settings.terms.as_ref().filter(|_| settings.accepted()).map(|terms| terms.accepted_at.clone()),
-                "changed": settings.terms_changed(),
-                "text": terms::json(),
-            },
+            // Clients from before computer use dropped its terms show them until this reads accepted: there are none
+            // to accept, and no text to show.
+            "terms": {"version": settings::EARLIER_TERMS_VERSION, "accepted": true, "acceptedAt": null, "changed": false},
             "permissions": permissions.as_ref().map(|state| json!({
                 "accessibility": state["accessibility"].as_bool().unwrap_or(false),
                 "screenRecording": state["screenRecording"].as_bool().unwrap_or(false),
@@ -572,51 +567,15 @@ impl Computer {
         name
     }
 
-    /// Records that the person agreed to terms `version` (the current one) and turns computer use on.
-    pub fn accept(&self, version: &str) -> Result<(), String> {
-        if version != terms::VERSION {
-            return Err(format!(
-                "These terms are out of date; the current version is {}.",
-                terms::VERSION
-            ));
-        }
-        self.store
-            .update(|settings| {
-                settings.terms = Some(Agreement {
-                    version: version.to_owned(),
-                    accepted_at: chrono::Utc::now()
-                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-                });
-                settings.enabled = true;
-            })
-            .map(|_| ())
-            .map_err(|error| format!("Saving the computer use settings failed: {error}."))
-    }
-
-    /// Switches computer use on or off. Switching on requires today's terms to be accepted; switching off halts an
-    /// agent before its next step and kills the helper straight away.
+    /// Switches computer use on or off, in one step either way. Switching off halts an agent before its next step and
+    /// kills the helper straight away.
     pub fn enable(&self, on: bool) -> Result<(), String> {
-        if on && !self.store.get().accepted() {
-            return Err("Accept the computer use terms before switching it on.".into());
-        }
         self.store
-            .update(|settings| settings.enabled = on)
+            .update(|settings| settings.switch(on))
             .map_err(|error| format!("Saving the computer use settings failed: {error}."))?;
         if !on {
             self.off();
         }
-        Ok(())
-    }
-
-    /// Withdraws the agreement: computer use stays off until the person agrees again.
-    pub fn withdraw(&self) -> Result<(), String> {
-        self.store
-            .update(|settings| {
-                settings.enabled = false;
-                settings.terms = None;
-            })
-            .map_err(|error| format!("Saving the computer use settings failed: {error}."))?;
-        self.off();
         Ok(())
     }
 
@@ -711,9 +670,9 @@ impl Computer {
         }
     }
 
-    /// Whether a management request would let agents do more than they may now: agreeing to the terms, switching on,
-    /// letting apps without a rule act, hiding the click ring, moving an app's rule toward allow, or ending the
-    /// person's pause. Switching off, withdrawing and tightening never count.
+    /// Whether a management request would let agents do more than they may now: switching on (`accept` too, which is
+    /// how earlier clients switch on), letting apps without a rule act, hiding the click ring, moving an app's rule
+    /// toward allow, or ending the person's pause. Switching off (`withdraw` too) and tightening never count.
     #[must_use]
     pub fn widens(&self, input: &Value) -> bool {
         match input["action"].as_str().unwrap_or("get") {
@@ -777,10 +736,10 @@ impl Computer {
                 return Ok(answer);
             }
             "get" | "view" => {}
-            "accept" => self.accept(input["version"].as_str().unwrap_or_default())?,
+            // Earlier clients switch on by accepting the terms they were shown, and off by withdrawing.
+            "accept" => self.enable(true)?,
             "enable" => self.enable(input["enabled"].as_bool().unwrap_or(true))?,
-            "disable" => self.enable(false)?,
-            "withdraw" => self.withdraw()?,
+            "disable" | "withdraw" => self.enable(false)?,
             "app" => {
                 let bundle = input["bundle"].as_str().unwrap_or_default();
                 let rule = match input["rule"].as_str() {
@@ -929,23 +888,64 @@ mod tests {
     async fn a_request_from_inside_haarness_cannot_widen_but_can_switch_off() {
         let root = tempfile::tempdir().unwrap();
         let computer = computer(root.path());
-        let refused = computer
-            .manage(&json!({"action": "accept", "version": terms::VERSION, INSIDE_FIELD: true}))
-            .await
-            .unwrap_err();
-        assert_eq!(refused, INSIDE_REFUSAL);
-        assert!(!computer.settings().accepted());
-        // From a person (no field, or a client claiming false) the same change goes through.
-        computer
-            .manage(&json!({"action": "accept", "version": terms::VERSION, INSIDE_FIELD: false}))
+        // Switching on, as today's clients ask and as earlier ones did.
+        for on in [
+            json!({"action": "enable", "enabled": true, INSIDE_FIELD: true}),
+            json!({"action": "enable", INSIDE_FIELD: true}),
+            json!({"action": "accept", "version": "2", INSIDE_FIELD: true}),
+        ] {
+            let refused = computer.manage(&on).await.unwrap_err();
+            assert_eq!(refused, INSIDE_REFUSAL, "{on}");
+            assert!(!computer.settings().enabled, "{on}");
+        }
+        // From a person (no field, or a client claiming false) switching on is one step.
+        let status = computer
+            .manage(&json!({"action": "enable", "enabled": true, INSIDE_FIELD: false}))
             .await
             .unwrap();
-        assert!(computer.settings().on());
-        computer
-            .manage(&json!({"action": "disable", INSIDE_FIELD: true}))
+        assert_eq!(status["enabled"], true);
+        assert!(computer.settings().enabled);
+        for off in [
+            json!({"action": "disable", INSIDE_FIELD: true}),
+            json!({"action": "withdraw", INSIDE_FIELD: true}),
+        ] {
+            computer
+                .manage(&json!({"action": "enable", "enabled": true}))
+                .await
+                .unwrap();
+            computer.manage(&off).await.unwrap();
+            assert!(!computer.settings().enabled, "{off}");
+        }
+    }
+
+    #[tokio::test]
+    async fn switching_on_is_one_step_and_earlier_clients_find_nothing_to_accept() {
+        let root = tempfile::tempdir().unwrap();
+        let computer = computer(root.path());
+        let status = computer.status().await;
+        assert_eq!(status["enabled"], false);
+        // Earlier clients show terms until the status says they are accepted: it always does, with no text to show.
+        assert_eq!(
+            status["terms"],
+            json!({"version": "2", "accepted": true, "acceptedAt": null, "changed": false})
+        );
+        let status = computer
+            .manage(&json!({"action": "enable", "enabled": true}))
             .await
             .unwrap();
-        assert!(!computer.settings().on());
+        assert_eq!(status["enabled"], true);
+        assert_eq!(status["switch"], true);
+        // An earlier client's agreement switches on, whatever version it names, and its withdrawal switches off.
+        for (action, on) in [
+            (json!({"action": "withdraw"}), false),
+            (json!({"action": "accept", "version": "1"}), true),
+            (json!({"action": "disable"}), false),
+            (json!({"action": "accept"}), true),
+        ] {
+            let status = computer.manage(&action).await.unwrap();
+            assert_eq!(status["enabled"], on, "{action}");
+            assert_eq!(status["terms"]["accepted"], true, "{action}");
+        }
     }
 
     #[tokio::test]

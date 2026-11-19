@@ -185,7 +185,7 @@ impl Lab {
     }
 
     fn on() -> Value {
-        json!({"enabled": true, "terms": {"version": haarness_computer::terms::VERSION, "acceptedAt": "2026-11-07T00:00:00Z"}})
+        json!({"enabled": true})
     }
 
     fn with(extra: Value) -> Value {
@@ -338,35 +338,33 @@ fn names(lab: &Lab) -> Vec<String> {
 }
 
 #[tokio::test]
-async fn off_or_without_agreement_no_tool_is_offered_and_no_helper_starts() {
+async fn the_switch_alone_offers_the_tools_and_offering_them_starts_no_helper() {
     let lab = Lab::new(json!({}));
     assert!(names(&lab).is_empty());
-    lab.settings(json!({"enabled": true}));
-    assert!(
-        names(&lab).is_empty(),
-        "on without agreeing to the terms is off"
-    );
+    // Off, with an agreement an earlier build recorded: off.
     lab.settings(
+        json!({"enabled": false, "terms": {"version": "2", "acceptedAt": "2026-11-07T00:00:00Z"}}),
+    );
+    assert!(names(&lab).is_empty());
+    let all = [
+        "mac_apps",
+        "mac_click",
+        "mac_drag",
+        "mac_hover",
+        "mac_press",
+        "mac_scroll",
+        "mac_snapshot",
+        "mac_type",
+    ];
+    // On, whatever an earlier build recorded about its terms.
+    for on in [
+        Lab::on(),
         json!({"enabled": true, "terms": {"version": "0", "acceptedAt": "2026-01-01T00:00:00Z"}}),
-    );
-    assert!(
-        names(&lab).is_empty(),
-        "agreeing to older terms is not enough"
-    );
-    lab.settings(Lab::on());
-    assert_eq!(
-        names(&lab),
-        [
-            "mac_apps",
-            "mac_click",
-            "mac_drag",
-            "mac_hover",
-            "mac_press",
-            "mac_scroll",
-            "mac_snapshot",
-            "mac_type"
-        ]
-    );
+        json!({"enabled": true, "terms": {"version": "2", "acceptedAt": "2026-11-07T00:00:00Z"}}),
+    ] {
+        lab.settings(on.clone());
+        assert_eq!(names(&lab), all, "{on}");
+    }
     assert!(
         lab.ops().is_empty(),
         "offering the tools starts no helper: {:?}",

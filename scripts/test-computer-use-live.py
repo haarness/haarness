@@ -322,9 +322,8 @@ class Chat:
 
 
 def switch_on():
-    """Turns computer use on with the terms this binary asks for accepted, as the person's own agreement would."""
-    version = json.loads(cli("mac", "status", "--json"))["terms"]["version"]
-    settings_file.write_text(json.dumps({"enabled": True, "terms": {"version": version, "acceptedAt": "2026-11-07T00:00:00Z"}}))
+    """Turns computer use on in the lab's own settings, as the person's switch would."""
+    settings_file.write_text(json.dumps({"enabled": True}))
 
 
 try:
